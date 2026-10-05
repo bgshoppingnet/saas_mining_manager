@@ -5,6 +5,7 @@ from urllib.parse import quote
 app = Flask(__name__)
 SHOP_URL = os.getenv('SHOP_URL', 'https://bgshopping.net').rstrip('/')
 PUBLIC_SHOP_URL = os.getenv('PUBLIC_SHOP_URL', 'https://bgshopping.net').rstrip('/')
+MYSHOPIFY_URL = os.getenv('MYSHOPIFY_URL', 'https://kynvva-gx.myshopify.com').rstrip('/')
 VAT_RATE = float(os.getenv('VAT_RATE', '0.20'))
 
 
@@ -73,25 +74,69 @@ def product_xml(p):
         yield '\n'.join(parts) + '\n'
 
 
+def source_candidates():
+    bases = []
+    for base in (SHOP_URL, PUBLIC_SHOP_URL, MYSHOPIFY_URL):
+        if base and base not in bases:
+            bases.append(base)
+    paths = ('/products.json', '/collections/all/products.json')
+    return [(base, path) for base in bases for path in paths]
+
+
+def probe_source(session, base, path):
+    url = f'{base}{path}'
+    try:
+        r = session.get(url, params={'limit': 250, 'page': 1}, timeout=(10, 45), allow_redirects=True)
+        content_type = r.headers.get('content-type', '')
+        data = r.json() if 'json' in content_type.lower() or r.text.lstrip().startswith('{') else {}
+        products = data.get('products', []) if isinstance(data, dict) else []
+        return {
+            'base': base,
+            'path': path,
+            'url': r.url,
+            'status': r.status_code,
+            'content_type': content_type,
+            'count': len(products),
+            'bytes': len(r.content),
+        }, products
+    except Exception as e:
+        return {
+            'base': base,
+            'path': path,
+            'status': 0,
+            'count': 0,
+            'error': f'{type(e).__name__}: {e}',
+        }, []
+
+
+def choose_source(session):
+    probes = []
+    for base, path in source_candidates():
+        probe, products = probe_source(session, base, path)
+        probes.append(probe)
+        if products:
+            return base, path, products, probes
+    return None, None, [], probes
+
+
 def stream_feed():
     yield '<?xml version="1.0" encoding="UTF-8"?>\n<products>\n'
 
     session = requests.Session()
-    session.headers.update({'User-Agent': 'BGShopping-Pazaruvaj-Feed/2.0'})
-    since_id = 0
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (compatible; BGShopping-Pazaruvaj-Feed/3.0; +https://bgshopping.net)',
+        'Accept': 'application/json,text/plain,*/*',
+    })
+
+    base, path, first_batch, _ = choose_source(session)
+    if not base:
+        yield '</products>\n'
+        return
+
+    page = 1
+    batch = first_batch
     seen = set()
-
-    while True:
-        params = {'limit': 250}
-        if since_id:
-            params['since_id'] = since_id
-
-        r = session.get(f'{SHOP_URL}/products.json', params=params, timeout=(10, 90))
-        r.raise_for_status()
-        batch = r.json().get('products', [])
-        if not batch:
-            break
-
+    while batch:
         for p in batch:
             pid = p.get('id')
             if pid in seen:
@@ -100,10 +145,16 @@ def stream_feed():
                 seen.add(pid)
             yield from product_xml(p)
 
-        last_id = batch[-1].get('id')
-        if len(batch) < 250 or not last_id or last_id == since_id:
+        if len(batch) < 250:
             break
-        since_id = last_id
+
+        page += 1
+        r = session.get(f'{base}{path}', params={'limit': 250, 'page': page}, timeout=(10, 90), allow_redirects=True)
+        r.raise_for_status()
+        data = r.json()
+        batch = data.get('products', []) if isinstance(data, dict) else []
+        if page > 500:
+            break
 
     yield '</products>\n'
 
@@ -114,13 +165,25 @@ def home():
         service='BGShopping Pazaruvaj Feed',
         feed='/pazaruvaj.xml',
         health='/health',
+        diagnostics='/debug-source',
         source=SHOP_URL,
     )
 
 
 @app.get('/health')
 def health():
-    return jsonify(ok=True, shop=SHOP_URL)
+    return jsonify(ok=True, shop=SHOP_URL, public_shop=PUBLIC_SHOP_URL, myshopify=MYSHOPIFY_URL)
+
+
+@app.get('/debug-source')
+def debug_source():
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (compatible; BGShopping-Pazaruvaj-Feed/3.0; +https://bgshopping.net)',
+        'Accept': 'application/json,text/plain,*/*',
+    })
+    base, path, products, probes = choose_source(session)
+    return jsonify(ok=bool(products), selected_base=base, selected_path=path, selected_count=len(products), probes=probes)
 
 
 @app.get('/pazaruvaj.xml')
@@ -128,7 +191,7 @@ def pazaruvaj():
     return Response(
         stream_with_context(stream_feed()),
         content_type='application/xml; charset=utf-8',
-        headers={'Cache-Control': 'public, max-age=3600'},
+        headers={'Cache-Control': 'no-cache, no-store, must-revalidate'},
     )
 
 
