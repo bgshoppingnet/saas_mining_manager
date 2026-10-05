@@ -56,19 +56,16 @@ def product_xml(p):
             f'<price>{esc(price)}</price>',
             f'<net_price>{net:.2f}</net_price>',
         ]
-
         if sku:
             parts.append(f'<sku>{esc(sku)}</sku>')
         if barcode:
             parts.append(f'<ean>{esc(barcode)}</ean>')
         if desc:
             parts.append(f'<description>{esc(desc)}</description>')
-
         for i, img in enumerate(images[:3], start=1):
             src = img.get('src') or ''
             if src:
                 parts.append(f'<image{i}>{esc(src)}</image{i}>')
-
         parts.append('<delivery_time>1</delivery_time>')
         parts.append('</product>')
         yield '\n'.join(parts) + '\n'
@@ -84,29 +81,13 @@ def source_candidates():
 
 
 def probe_source(session, base, path):
-    url = f'{base}{path}'
     try:
-        r = session.get(url, params={'limit': 250, 'page': 1}, timeout=(10, 45), allow_redirects=True)
-        content_type = r.headers.get('content-type', '')
-        data = r.json() if 'json' in content_type.lower() or r.text.lstrip().startswith('{') else {}
+        r = session.get(f'{base}{path}', params={'limit': 250}, timeout=(10, 45), allow_redirects=True)
+        data = r.json()
         products = data.get('products', []) if isinstance(data, dict) else []
-        return {
-            'base': base,
-            'path': path,
-            'url': r.url,
-            'status': r.status_code,
-            'content_type': content_type,
-            'count': len(products),
-            'bytes': len(r.content),
-        }, products
+        return {'base': base, 'path': path, 'status': r.status_code, 'count': len(products)}, products
     except Exception as e:
-        return {
-            'base': base,
-            'path': path,
-            'status': 0,
-            'count': 0,
-            'error': f'{type(e).__name__}: {e}',
-        }, []
+        return {'base': base, 'path': path, 'status': 0, 'count': 0, 'error': f'{type(e).__name__}: {e}'}, []
 
 
 def choose_source(session):
@@ -121,53 +102,62 @@ def choose_source(session):
 
 def stream_feed():
     yield '<?xml version="1.0" encoding="UTF-8"?>\n<products>\n'
-
     session = requests.Session()
     session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (compatible; BGShopping-Pazaruvaj-Feed/3.0; +https://bgshopping.net)',
+        'User-Agent': 'Mozilla/5.0 (compatible; BGShopping-Pazaruvaj-Feed/4.0; +https://bgshopping.net)',
         'Accept': 'application/json,text/plain,*/*',
+        'Connection': 'keep-alive',
     })
 
-    base, path, first_batch, _ = choose_source(session)
-    if not base:
+    try:
+        base, path, batch, _ = choose_source(session)
+        if not base:
+            return
+
+        seen = set()
+        since_id = 0
+        request_count = 0
+
+        while batch and request_count < 500:
+            max_id = since_id
+            for p in batch:
+                pid = p.get('id')
+                if pid is not None:
+                    try:
+                        pid_num = int(pid)
+                        if pid_num > max_id:
+                            max_id = pid_num
+                    except Exception:
+                        pass
+                if pid in seen:
+                    continue
+                if pid is not None:
+                    seen.add(pid)
+                yield from product_xml(p)
+
+            if len(batch) < 250 or max_id <= since_id:
+                break
+
+            since_id = max_id
+            request_count += 1
+            r = session.get(
+                f'{base}{path}',
+                params={'limit': 250, 'since_id': since_id},
+                timeout=(10, 25),
+                allow_redirects=True,
+            )
+            r.raise_for_status()
+            data = r.json()
+            batch = data.get('products', []) if isinstance(data, dict) else []
+    except Exception as e:
+        yield f'<!-- feed stopped safely: {esc(type(e).__name__)} -->\n'
+    finally:
         yield '</products>\n'
-        return
-
-    page = 1
-    batch = first_batch
-    seen = set()
-    while batch:
-        for p in batch:
-            pid = p.get('id')
-            if pid in seen:
-                continue
-            if pid is not None:
-                seen.add(pid)
-            yield from product_xml(p)
-
-        if len(batch) < 250:
-            break
-
-        page += 1
-        r = session.get(f'{base}{path}', params={'limit': 250, 'page': page}, timeout=(10, 90), allow_redirects=True)
-        r.raise_for_status()
-        data = r.json()
-        batch = data.get('products', []) if isinstance(data, dict) else []
-        if page > 500:
-            break
-
-    yield '</products>\n'
 
 
 @app.get('/')
 def home():
-    return jsonify(
-        service='BGShopping Pazaruvaj Feed',
-        feed='/pazaruvaj.xml',
-        health='/health',
-        diagnostics='/debug-source',
-        source=SHOP_URL,
-    )
+    return jsonify(service='BGShopping Pazaruvaj Feed', feed='/pazaruvaj.xml', health='/health', diagnostics='/debug-source')
 
 
 @app.get('/health')
@@ -178,10 +168,7 @@ def health():
 @app.get('/debug-source')
 def debug_source():
     session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (compatible; BGShopping-Pazaruvaj-Feed/3.0; +https://bgshopping.net)',
-        'Accept': 'application/json,text/plain,*/*',
-    })
+    session.headers.update({'User-Agent': 'BGShopping-Pazaruvaj-Feed/4.0', 'Accept': 'application/json'})
     base, path, products, probes = choose_source(session)
     return jsonify(ok=bool(products), selected_base=base, selected_path=path, selected_count=len(products), probes=probes)
 
@@ -191,7 +178,10 @@ def pazaruvaj():
     return Response(
         stream_with_context(stream_feed()),
         content_type='application/xml; charset=utf-8',
-        headers={'Cache-Control': 'no-cache, no-store, must-revalidate'},
+        headers={
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'X-Content-Type-Options': 'nosniff',
+        },
     )
 
 
