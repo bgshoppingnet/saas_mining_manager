@@ -1,5 +1,5 @@
-from flask import Flask, Response, jsonify, stream_with_context
-import os, html, requests, re
+from flask import Flask, Response, jsonify, send_file
+import os, html, requests, re, threading, time
 from urllib.parse import quote
 
 app = Flask(__name__)
@@ -7,6 +7,11 @@ SHOP_URL = os.getenv('SHOP_URL', 'https://bgshopping.net').rstrip('/')
 PUBLIC_SHOP_URL = os.getenv('PUBLIC_SHOP_URL', 'https://bgshopping.net').rstrip('/')
 MYSHOPIFY_URL = os.getenv('MYSHOPIFY_URL', 'https://kynvva-gx.myshopify.com').rstrip('/')
 VAT_RATE = float(os.getenv('VAT_RATE', '0.20'))
+REFRESH_SECONDS = int(os.getenv('REFRESH_SECONDS', '14400'))
+FEED_PATH = '/tmp/pazaruvaj.xml'
+TMP_PATH = '/tmp/pazaruvaj.xml.tmp'
+state = {'building': False, 'last_ok': None, 'last_error': None, 'products': 0, 'variants': 0}
+lock = threading.Lock()
 
 
 def esc(v):
@@ -24,28 +29,26 @@ def product_xml(p):
     ptype = p.get('product_type', '')
     desc = strip_html(p.get('body_html', ''))
     images = p.get('images') or []
-
+    chunks = []
+    variants = 0
     for v in p.get('variants') or []:
         if not v.get('available', True):
             continue
-
+        variants += 1
         vid = v.get('id', '')
         title = p.get('title', '')
         vtitle = v.get('title', '')
         if vtitle and vtitle != 'Default Title':
             title = f'{title} - {vtitle}'
-
         price = v.get('price') or '0'
         try:
             gross = float(price)
             net = gross / (1 + VAT_RATE)
         except Exception:
             net = 0
-
         link = f'{PUBLIC_SHOP_URL}/products/{quote(handle)}?variant={vid}'
         sku = v.get('sku', '')
         barcode = v.get('barcode') or ''
-
         parts = [
             '<product>',
             f'<identifier>{esc(vid)}</identifier>',
@@ -68,7 +71,8 @@ def product_xml(p):
                 parts.append(f'<image{i}>{esc(src)}</image{i}>')
         parts.append('<delivery_time>1</delivery_time>')
         parts.append('</product>')
-        yield '\n'.join(parts) + '\n'
+        chunks.append('\n'.join(parts) + '\n')
+    return ''.join(chunks), variants
 
 
 def source_candidates():
@@ -80,110 +84,151 @@ def source_candidates():
     return [(base, path) for base in bases for path in paths]
 
 
-def probe_source(session, base, path):
-    try:
-        r = session.get(f'{base}{path}', params={'limit': 250}, timeout=(10, 45), allow_redirects=True)
-        data = r.json()
-        products = data.get('products', []) if isinstance(data, dict) else []
-        return {'base': base, 'path': path, 'status': r.status_code, 'count': len(products)}, products
-    except Exception as e:
-        return {'base': base, 'path': path, 'status': 0, 'count': 0, 'error': f'{type(e).__name__}: {e}'}, []
-
-
 def choose_source(session):
     probes = []
     for base, path in source_candidates():
-        probe, products = probe_source(session, base, path)
-        probes.append(probe)
-        if products:
-            return base, path, products, probes
+        try:
+            r = session.get(f'{base}{path}', params={'limit': 250}, timeout=(10, 45), allow_redirects=True)
+            data = r.json()
+            products = data.get('products', []) if isinstance(data, dict) else []
+            probes.append({'base': base, 'path': path, 'status': r.status_code, 'count': len(products)})
+            if products:
+                return base, path, products, probes
+        except Exception as e:
+            probes.append({'base': base, 'path': path, 'status': 0, 'count': 0, 'error': f'{type(e).__name__}: {e}'})
     return None, None, [], probes
 
 
-def stream_feed():
-    yield '<?xml version="1.0" encoding="UTF-8"?>\n<products>\n'
-    session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (compatible; BGShopping-Pazaruvaj-Feed/4.0; +https://bgshopping.net)',
-        'Accept': 'application/json,text/plain,*/*',
-        'Connection': 'keep-alive',
-    })
-
+def build_feed_once():
+    with lock:
+        if state['building']:
+            return
+        state['building'] = True
+        state['last_error'] = None
     try:
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (compatible; BGShopping-Pazaruvaj-Feed/5.0; +https://bgshopping.net)',
+            'Accept': 'application/json,text/plain,*/*',
+        })
         base, path, batch, _ = choose_source(session)
         if not base:
-            return
+            raise RuntimeError('No Shopify JSON product source returned products')
 
         seen = set()
         since_id = 0
+        product_count = 0
+        variant_count = 0
         request_count = 0
 
-        while batch and request_count < 500:
-            max_id = since_id
-            for p in batch:
-                pid = p.get('id')
-                if pid is not None:
-                    try:
-                        pid_num = int(pid)
-                        if pid_num > max_id:
-                            max_id = pid_num
-                    except Exception:
-                        pass
-                if pid in seen:
-                    continue
-                if pid is not None:
-                    seen.add(pid)
-                yield from product_xml(p)
+        with open(TMP_PATH, 'w', encoding='utf-8', newline='\n') as f:
+            f.write('<?xml version="1.0" encoding="UTF-8"?>\n<products>\n')
+            while batch and request_count < 500:
+                max_id = since_id
+                for p in batch:
+                    pid = p.get('id')
+                    if pid in seen:
+                        continue
+                    if pid is not None:
+                        seen.add(pid)
+                        try:
+                            max_id = max(max_id, int(pid))
+                        except Exception:
+                            pass
+                    xml, variants = product_xml(p)
+                    if xml:
+                        f.write(xml)
+                        variant_count += variants
+                    product_count += 1
 
-            if len(batch) < 250 or max_id <= since_id:
-                break
+                if len(batch) < 250 or max_id <= since_id:
+                    break
 
-            since_id = max_id
-            request_count += 1
-            r = session.get(
-                f'{base}{path}',
-                params={'limit': 250, 'since_id': since_id},
-                timeout=(10, 25),
-                allow_redirects=True,
-            )
-            r.raise_for_status()
-            data = r.json()
-            batch = data.get('products', []) if isinstance(data, dict) else []
+                since_id = max_id
+                request_count += 1
+                r = session.get(
+                    f'{base}{path}',
+                    params={'limit': 250, 'since_id': since_id},
+                    timeout=(10, 60),
+                    allow_redirects=True,
+                )
+                r.raise_for_status()
+                data = r.json()
+                batch = data.get('products', []) if isinstance(data, dict) else []
+
+            f.write('</products>\n')
+            f.flush()
+            os.fsync(f.fileno())
+
+        os.replace(TMP_PATH, FEED_PATH)
+        with lock:
+            state['last_ok'] = time.time()
+            state['products'] = product_count
+            state['variants'] = variant_count
+            state['last_error'] = None
     except Exception as e:
-        yield f'<!-- feed stopped safely: {esc(type(e).__name__)} -->\n'
+        try:
+            if os.path.exists(TMP_PATH):
+                os.remove(TMP_PATH)
+        except Exception:
+            pass
+        with lock:
+            state['last_error'] = f'{type(e).__name__}: {e}'
     finally:
-        yield '</products>\n'
+        with lock:
+            state['building'] = False
+
+
+def builder_loop():
+    while True:
+        build_feed_once()
+        time.sleep(REFRESH_SECONDS)
+
+
+def start_builder():
+    t = threading.Thread(target=builder_loop, name='pazaruvaj-feed-builder', daemon=True)
+    t.start()
 
 
 @app.get('/')
 def home():
-    return jsonify(service='BGShopping Pazaruvaj Feed', feed='/pazaruvaj.xml', health='/health', diagnostics='/debug-source')
+    return jsonify(service='BGShopping Pazaruvaj Feed', feed='/pazaruvaj.xml', status='/feed-status')
 
 
 @app.get('/health')
 def health():
-    return jsonify(ok=True, shop=SHOP_URL, public_shop=PUBLIC_SHOP_URL, myshopify=MYSHOPIFY_URL)
+    return jsonify(ok=True)
 
 
-@app.get('/debug-source')
-def debug_source():
-    session = requests.Session()
-    session.headers.update({'User-Agent': 'BGShopping-Pazaruvaj-Feed/4.0', 'Accept': 'application/json'})
-    base, path, products, probes = choose_source(session)
-    return jsonify(ok=bool(products), selected_base=base, selected_path=path, selected_count=len(products), probes=probes)
+@app.get('/feed-status')
+def feed_status():
+    with lock:
+        data = dict(state)
+    data['ready'] = os.path.exists(FEED_PATH)
+    if data['last_ok']:
+        data['last_ok_iso'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(data['last_ok']))
+    return jsonify(data)
 
 
 @app.get('/pazaruvaj.xml')
 def pazaruvaj():
-    return Response(
-        stream_with_context(stream_feed()),
-        content_type='application/xml; charset=utf-8',
-        headers={
-            'Cache-Control': 'no-cache, no-store, must-revalidate',
-            'X-Content-Type-Options': 'nosniff',
-        },
+    if not os.path.exists(FEED_PATH):
+        return Response(
+            '<?xml version="1.0" encoding="UTF-8"?>\n<products></products>\n',
+            status=503,
+            content_type='application/xml; charset=utf-8',
+            headers={'Retry-After': '60', 'Cache-Control': 'no-store'},
+        )
+    return send_file(
+        FEED_PATH,
+        mimetype='application/xml',
+        as_attachment=False,
+        conditional=True,
+        max_age=300,
     )
 
+
+start_builder()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', '10000')))
