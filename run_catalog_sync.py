@@ -1,6 +1,6 @@
 import json, os, time
+import requests
 from supplier_worker import run as run_suppliers
-import shopify_sync
 
 STATUS_PATH = os.getenv('CATALOG_SYNC_STATUS_PATH', '/tmp/catalog-sync-status.json')
 
@@ -14,7 +14,49 @@ def write_status(data):
     os.replace(tmp, STATUS_PATH)
 
 
-def install_location_fallback():
+def ensure_shopify_access_token():
+    current = os.getenv('SHOPIFY_ADMIN_ACCESS_TOKEN', '').strip()
+    if current:
+        return {'mode': 'existing_token'}
+
+    shop_domain = os.getenv('SHOPIFY_SHOP_DOMAIN', '').strip()
+    client_id = os.getenv('SHOPIFY_CLIENT_ID', '').strip()
+    client_secret = os.getenv('SHOPIFY_CLIENT_SECRET', '').strip()
+    missing = [
+        name for name, value in (
+            ('SHOPIFY_SHOP_DOMAIN', shop_domain),
+            ('SHOPIFY_CLIENT_ID', client_id),
+            ('SHOPIFY_CLIENT_SECRET', client_secret),
+        ) if not value
+    ]
+    if missing:
+        raise RuntimeError('Missing Shopify authentication settings: ' + ', '.join(missing))
+
+    response = requests.post(
+        f'https://{shop_domain}/admin/oauth/access_token',
+        headers={'Content-Type': 'application/x-www-form-urlencoded'},
+        data={
+            'grant_type': 'client_credentials',
+            'client_id': client_id,
+            'client_secret': client_secret,
+        },
+        timeout=(15, 60),
+    )
+    response.raise_for_status()
+    payload = response.json()
+    token = str(payload.get('access_token') or '').strip()
+    if not token:
+        raise RuntimeError('Shopify did not return an access token')
+
+    os.environ['SHOPIFY_ADMIN_ACCESS_TOKEN'] = token
+    return {
+        'mode': 'client_credentials',
+        'expires_in': payload.get('expires_in'),
+        'scope': payload.get('scope'),
+    }
+
+
+def install_location_fallback(shopify_sync):
     original_locations = shopify_sync.discover_primary_locations
     original_inventory = shopify_sync.set_inventory
     fallback_active = {'value': False}
@@ -44,8 +86,6 @@ def install_location_fallback():
                     'zip': '',
                 },
             }]
-        # Do not block product writes if Shopify location discovery is temporarily unavailable.
-        # A synthetic marker lets the main sync continue; inventory writes are skipped below.
         fallback_active['value'] = True
         return [{
             'id': 'location-unavailable',
@@ -77,6 +117,7 @@ def run():
         'state': 'running',
         'started_at': started,
         'suppliers': None,
+        'shopify_auth': None,
         'shopify': None,
         'fatal_error': None,
     }
@@ -84,7 +125,12 @@ def run():
     try:
         result['suppliers'] = run_suppliers()
         write_status(result)
-        install_location_fallback()
+
+        result['shopify_auth'] = ensure_shopify_access_token()
+        write_status(result)
+
+        import shopify_sync
+        install_location_fallback(shopify_sync)
         result['shopify'] = shopify_sync.run()
         supplier_state = (result['suppliers'] or {}).get('state', '')
         shopify_state = (result['shopify'] or {}).get('state', '')
