@@ -9,6 +9,9 @@ TOKEN = os.getenv('SHOPIFY_ADMIN_ACCESS_TOKEN', '').strip()
 API_VERSION = os.getenv('SHOPIFY_API_VERSION', '2026-10').strip()
 WRITE_ENABLED = os.getenv('SHOPIFY_WRITE_ENABLED', 'false').lower() in ('1','true','yes','on')
 LOCATION_ID = os.getenv('SHOPIFY_LOCATION_ID', '').strip()
+PRIMARY_COUNTRY_CODE = os.getenv('SHOPIFY_PRIMARY_COUNTRY_CODE', 'BG').strip().upper()
+PRIMARY_MARKET = os.getenv('SHOPIFY_PRIMARY_MARKET', 'Bulgaria').strip()
+SECONDARY_MARKETS = os.getenv('SHOPIFY_SECONDARY_MARKETS', 'European Union,United Kingdom').strip()
 DEFAULT_VENDOR = os.getenv('SHOPIFY_DEFAULT_VENDOR', '').strip()
 NEW_PRODUCT_STATUS = os.getenv('SHOPIFY_NEW_PRODUCT_STATUS', 'ACTIVE').strip().upper()
 INVENTORY_POLICY = os.getenv('SHOPIFY_INVENTORY_POLICY', 'CONTINUE').strip().upper()
@@ -27,6 +30,17 @@ query FindVariants($query: String!) {
         id title handle vendor
         metafield(namespace: "supplier_sync", key: "source_image_url") { value }
       }
+    }
+  }
+}
+'''
+
+LOCATIONS_QUERY = '''
+query BulgarianLocations($first: Int!, $query: String!) {
+  locations(first: $first, query: $query) {
+    nodes {
+      id name isActive fulfillsOnlineOrders hasActiveInventory
+      address { city country countryCode province zip }
     }
   }
 }
@@ -51,8 +65,8 @@ mutation UpdateVariant($productId: ID!, $variants: [ProductVariantsBulkInput!]!)
 '''
 
 INVENTORY_SET = '''
-mutation SetInventory($input: InventorySetQuantitiesInput!, $key: String!) {
-  inventorySetQuantities(input: $input) @idempotent(key: $key) {
+mutation SetInventory($input: InventorySetQuantitiesInput!) {
+  inventorySetQuantities(input: $input) {
     inventoryAdjustmentGroup { createdAt reason referenceDocumentUri }
     userErrors { field message }
   }
@@ -130,7 +144,7 @@ def seo_description(item):
     supplier = clean_text(item.get('supplier'))
     bits = [x for x in (name, supplier) if x]
     base = ' • '.join(bits)
-    return (base + ' Поръчайте онлайн от BGShopping.net.')[:320]
+    return (base + ' Поръчайте онлайн от BGShopping.net. Доставка в България и Европа.')[:320]
 
 
 def product_description(item):
@@ -148,6 +162,7 @@ def product_description(item):
     if ean: details.append(f'EAN: {html.escape(ean)}')
     if details:
         parts.append('<p>' + ' · '.join(details) + '</p>')
+    parts.append('<p>Основен пазар: България. Доставка и продажби към клиенти в България и Европа.</p>')
     return ''.join(parts)
 
 
@@ -176,6 +191,16 @@ def gql(session, query, variables):
 
 def user_errors(result):
     return result.get('userErrors') or []
+
+
+def discover_primary_locations(session):
+    query = f'country:{PRIMARY_COUNTRY_CODE} active:true'
+    data = gql(session, LOCATIONS_QUERY, {'first': 50, 'query': query})
+    nodes = ((data.get('locations') or {}).get('nodes') or [])
+    nodes = [x for x in nodes if x.get('isActive') and x.get('fulfillsOnlineOrders')]
+    if LOCATION_ID:
+        nodes.sort(key=lambda x: 0 if x.get('id') == LOCATION_ID else 1)
+    return nodes
 
 
 def exact_matches(nodes, item):
@@ -216,6 +241,13 @@ def source_image(item):
     return image if image.startswith(('http://','https://')) else ''
 
 
+def geo_metafields():
+    return [
+        {'namespace':'supplier_sync','key':'primary_market','type':'single_line_text_field','value':PRIMARY_MARKET},
+        {'namespace':'supplier_sync','key':'secondary_markets','type':'single_line_text_field','value':SECONDARY_MARKETS},
+    ]
+
+
 def product_update_input(item, existing):
     product = existing['product']
     p = {
@@ -227,7 +259,7 @@ def product_update_input(item, existing):
         'metafields': [
             {'namespace':'supplier_sync','key':'supplier','type':'single_line_text_field','value':clean_text(item.get('supplier')) or 'unknown'},
             {'namespace':'supplier_sync','key':'source_key','type':'single_line_text_field','value':clean_text(item.get('key')) or generated_handle(item)},
-        ],
+        ] + geo_metafields(),
     }
     if FIX_HANDLES:
         handle = generated_handle(item)
@@ -259,28 +291,33 @@ def variant_update_input(item, existing):
     return v
 
 
-def set_inventory(session, item, inventory_item_id):
+def set_inventory(session, item, inventory_item_id, locations):
     qty = quantity(item.get('quantity'))
-    if qty is None or not LOCATION_ID or not inventory_item_id:
-        return False
+    if qty is None or not inventory_item_id or not locations:
+        return 0
+    # Supplier feeds normally expose one aggregate stock value. Writing it to every
+    # location would multiply total stock, so aggregate stock is assigned to the
+    # preferred/first Bulgarian fulfillment point. Per-location feed data can extend this later.
+    target = locations[0]
+    location_id = target['id']
     token = clean_text(item.get('key') or item.get('sku') or item.get('ean') or inventory_item_id)
-    idem = hashlib.sha256(f'{token}|{LOCATION_ID}|{qty}'.encode('utf-8')).hexdigest()
+    idem = hashlib.sha256(f'{token}|{location_id}|{qty}'.encode('utf-8')).hexdigest()
     payload = {
         'name': 'available',
         'reason': 'correction',
         'referenceDocumentUri': f'gid://bgshopping-catalog-sync/SupplierSync/{idem[:24]}',
         'quantities': [{
             'inventoryItemId': inventory_item_id,
-            'locationId': LOCATION_ID,
+            'locationId': location_id,
             'quantity': qty,
             'changeFromQuantity': None,
         }],
     }
-    data = gql(session, INVENTORY_SET, {'input': payload, 'key': idem})
+    data = gql(session, INVENTORY_SET, {'input': payload})
     result = data.get('inventorySetQuantities') or {}
     if user_errors(result):
         raise RuntimeError(json.dumps(user_errors(result), ensure_ascii=False))
-    return True
+    return 1
 
 
 def build_new_product_input(item):
@@ -298,7 +335,7 @@ def build_new_product_input(item):
         'metafields': [
             {'namespace':'supplier_sync','key':'supplier','type':'single_line_text_field','value':clean_text(item.get('supplier')) or 'unknown'},
             {'namespace':'supplier_sync','key':'source_key','type':'single_line_text_field','value':clean_text(item.get('key')) or handle},
-        ],
+        ] + geo_metafields(),
         'productOptions': [{'name':'Title','position':1,'values':[{'name':'Default Title'}]}],
     }
     image = source_image(item)
@@ -334,11 +371,25 @@ def run():
     started = time.time()
     status = {
         'state':'running','write_enabled':WRITE_ENABLED,'started_at':started,
+        'primary_market':PRIMARY_MARKET,'secondary_markets':SECONDARY_MARKETS,
+        'primary_country_code':PRIMARY_COUNTRY_CODE,'locations':[],
         'matched':0,'updated':0,'created':0,'inventory_updated':0,
         'dry_run':0,'skipped':0,'errors':[],
     }
     session = requests.Session()
     try:
+        locations = discover_primary_locations(session) if TOKEN and SHOP_DOMAIN else []
+        status['locations'] = [
+            {
+                'id':x.get('id'),'name':x.get('name'),
+                'city':((x.get('address') or {}).get('city')),
+                'countryCode':((x.get('address') or {}).get('countryCode')),
+                'fulfillsOnlineOrders':x.get('fulfillsOnlineOrders'),
+            }
+            for x in locations
+        ]
+        if WRITE_ENABLED and not locations:
+            raise RuntimeError(f'No active fulfillment locations found for {PRIMARY_COUNTRY_CODE}')
         for item in iter_catalog() or []:
             try:
                 if not clean_text(item.get('sku')) and not clean_text(item.get('ean')):
@@ -361,8 +412,7 @@ def run():
                     if user_errors(vresult):
                         raise RuntimeError(json.dumps(user_errors(vresult), ensure_ascii=False))
                     status['updated'] += 1
-                    if set_inventory(session, item, (existing.get('inventoryItem') or {}).get('id')):
-                        status['inventory_updated'] += 1
+                    status['inventory_updated'] += set_inventory(session, item, (existing.get('inventoryItem') or {}).get('id'), locations)
                 else:
                     new_input = build_new_product_input(item)
                     ndata = gql(session, PRODUCT_SET, {'input':new_input})
@@ -375,8 +425,7 @@ def run():
                     status['created'] += 1
                     nodes = ((product.get('variants') or {}).get('nodes') or [])
                     inventory_item_id = ((nodes[0].get('inventoryItem') or {}).get('id')) if nodes else None
-                    if set_inventory(session, item, inventory_item_id):
-                        status['inventory_updated'] += 1
+                    status['inventory_updated'] += set_inventory(session, item, inventory_item_id, locations)
                 time.sleep(REQUEST_DELAY)
             except Exception as e:
                 status['errors'].append({
