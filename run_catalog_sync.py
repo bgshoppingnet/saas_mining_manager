@@ -69,9 +69,6 @@ def run():
     }
     write_status(result)
     try:
-        # Parse the full supplier catalog first. Do not apply the legacy global
-        # image filter here: existing products without images still need price,
-        # stock and metadata updates. Creation safety is handled by the bulk sync.
         result['suppliers'] = run_suppliers()
         write_status(result)
 
@@ -82,10 +79,12 @@ def run():
         result['shopify_auth'] = ensure_shopify_access_token()
         write_status(result)
 
-        # Import after auth so module-level credentials see the fresh token.
         import importlib
         import bulk_shopify_sync
+        import bulk_shopify_sync_patch
         bulk_shopify_sync = importlib.reload(bulk_shopify_sync)
+        bulk_shopify_sync_patch = importlib.reload(bulk_shopify_sync_patch)
+        bulk_shopify_sync_patch.install(bulk_shopify_sync)
         bulk_shopify_sync.TOKEN = os.environ.get('SHOPIFY_ADMIN_ACCESS_TOKEN', '').strip()
         bulk_shopify_sync.SHOP = os.environ.get('SHOPIFY_SHOP_DOMAIN', '').strip()
 
