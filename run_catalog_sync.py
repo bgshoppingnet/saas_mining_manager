@@ -1,6 +1,6 @@
 import json, os, time
 from supplier_worker import run as run_suppliers
-from shopify_sync import run as run_shopify
+import shopify_sync
 
 STATUS_PATH = os.getenv('CATALOG_SYNC_STATUS_PATH', '/tmp/catalog-sync-status.json')
 
@@ -12,6 +12,37 @@ def write_status(data):
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, STATUS_PATH)
+
+
+def install_location_fallback():
+    original = shopify_sync.discover_primary_locations
+
+    def discover_with_fallback(session):
+        try:
+            locations = original(session)
+        except Exception:
+            locations = []
+        if locations:
+            return locations
+        location_id = os.getenv('SHOPIFY_LOCATION_ID', '').strip()
+        if not location_id:
+            return []
+        return [{
+            'id': location_id,
+            'name': os.getenv('SHOPIFY_LOCATION_NAME', 'Bulgaria primary location'),
+            'isActive': True,
+            'fulfillsOnlineOrders': True,
+            'hasActiveInventory': True,
+            'address': {
+                'city': os.getenv('SHOPIFY_LOCATION_CITY', 'Plovdiv'),
+                'country': 'Bulgaria',
+                'countryCode': os.getenv('SHOPIFY_PRIMARY_COUNTRY_CODE', 'BG').strip().upper() or 'BG',
+                'province': None,
+                'zip': '',
+            },
+        }]
+
+    shopify_sync.discover_primary_locations = discover_with_fallback
 
 
 def run():
@@ -27,7 +58,8 @@ def run():
     try:
         result['suppliers'] = run_suppliers()
         write_status(result)
-        result['shopify'] = run_shopify()
+        install_location_fallback()
+        result['shopify'] = shopify_sync.run()
         supplier_state = (result['suppliers'] or {}).get('state', '')
         shopify_state = (result['shopify'] or {}).get('state', '')
         if supplier_state == 'failed' or shopify_state == 'failed':
