@@ -1,15 +1,13 @@
 import os, json, time, hashlib
 import requests
 import xml.etree.ElementTree as ET
-from urllib.parse import urlparse
 
 OUT_PATH = os.getenv('SUPPLIER_OUT_PATH', '/tmp/supplier-catalog.jsonl')
 STATUS_PATH = os.getenv('SUPPLIER_STATUS_PATH', '/tmp/supplier-status.json')
 TIMEOUT = (15, 120)
 
+# Only confirmed feeds are enabled by default. Add the rest through SUPPLIER_FEEDS_JSON.
 DEFAULT_FEEDS = [
-    {"name": "Euromaster", "url": "https://api.euromasterbg.com/feeds/productfeedshops.xml", "enabled": True},
-    {"name": "KikkaBoo", "url": "https://kikkaboo-b2b.com/media/feed/products-bg-online.xml", "enabled": True},
     {"name": "Lorelli", "url": "https://lorelli.eu/ExportRssXmlFeed.aspx?token=38052958-16d5-43a7-9724-738c2550b7c1&lang=bg-bg", "enabled": True},
 ]
 
