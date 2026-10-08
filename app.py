@@ -1,6 +1,7 @@
 from flask import Flask, Response, jsonify, send_file
-import os, html, requests, re, threading, time
+import os, html, requests, re, threading, time, json
 from urllib.parse import quote
+from run_catalog_sync import run as run_catalog_sync
 
 app = Flask(__name__)
 SHOP_URL = os.getenv('SHOP_URL', 'https://bgshopping.net').rstrip('/')
@@ -8,8 +9,12 @@ PUBLIC_SHOP_URL = os.getenv('PUBLIC_SHOP_URL', 'https://bgshopping.net').rstrip(
 MYSHOPIFY_URL = os.getenv('MYSHOPIFY_URL', 'https://kynvva-gx.myshopify.com').rstrip('/')
 VAT_RATE = float(os.getenv('VAT_RATE', '0.20'))
 REFRESH_SECONDS = int(os.getenv('REFRESH_SECONDS', '14400'))
+ENABLE_CATALOG_SYNC = os.getenv('ENABLE_CATALOG_SYNC', 'true').lower() in ('1', 'true', 'yes', 'on')
 FEED_PATH = '/tmp/pazaruvaj.xml'
 TMP_PATH = '/tmp/pazaruvaj.xml.tmp'
+CATALOG_STATUS_PATH = os.getenv('CATALOG_SYNC_STATUS_PATH', '/tmp/catalog-sync-status.json')
+SUPPLIER_STATUS_PATH = os.getenv('SUPPLIER_STATUS_PATH', '/tmp/supplier-status.json')
+SHOPIFY_STATUS_PATH = os.getenv('SHOPIFY_SYNC_STATUS_PATH', '/tmp/shopify-sync-status.json')
 state = {'building': False, 'last_ok': None, 'last_error': None, 'products': 0, 'variants': 0}
 lock = threading.Lock()
 
@@ -21,6 +26,37 @@ def esc(v):
 def strip_html(s):
     s = re.sub(r'<[^>]+>', ' ', s or '')
     return ' '.join(html.unescape(s).split())
+
+
+def read_json_status(path):
+    try:
+        if not os.path.exists(path):
+            return None
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        return {'state': 'status_read_error', 'error': f'{type(e).__name__}: {e}'}
+
+
+def safe_sync_config():
+    raw = os.getenv('SUPPLIER_FEEDS_JSON', '').strip()
+    feed_count = 1
+    if raw:
+        try:
+            feed_count = len([x for x in json.loads(raw) if x.get('enabled', True) and x.get('url')])
+        except Exception:
+            feed_count = None
+    return {
+        'enabled': ENABLE_CATALOG_SYNC,
+        'refresh_seconds': REFRESH_SECONDS,
+        'supplier_feed_count': feed_count,
+        'shopify_write_enabled': os.getenv('SHOPIFY_WRITE_ENABLED', 'false').lower() in ('1','true','yes','on'),
+        'shopify_domain_configured': bool(os.getenv('SHOPIFY_SHOP_DOMAIN', '').strip()),
+        'shopify_token_configured': bool(os.getenv('SHOPIFY_ADMIN_ACCESS_TOKEN', '').strip()),
+        'shopify_location_configured': bool(os.getenv('SHOPIFY_LOCATION_ID', '').strip()),
+        'fix_handles': os.getenv('SHOPIFY_FIX_HANDLES', 'false').lower() in ('1','true','yes','on'),
+        'add_images': os.getenv('SHOPIFY_ADD_IMAGES', 'true').lower() in ('1','true','yes','on'),
+    }
 
 
 def product_xml(p):
@@ -114,13 +150,11 @@ def build_feed_once():
         base, path, batch, _ = choose_source(session)
         if not base:
             raise RuntimeError('No Shopify JSON product source returned products')
-
         seen = set()
         since_id = 0
         product_count = 0
         variant_count = 0
         request_count = 0
-
         with open(TMP_PATH, 'w', encoding='utf-8', newline='\n') as f:
             f.write('<?xml version="1.0" encoding="UTF-8"?>\n<products>\n')
             while batch and request_count < 500:
@@ -140,10 +174,8 @@ def build_feed_once():
                         f.write(xml)
                         variant_count += variants
                     product_count += 1
-
                 if len(batch) < 250 or max_id <= since_id:
                     break
-
                 since_id = max_id
                 request_count += 1
                 r = session.get(
@@ -155,11 +187,9 @@ def build_feed_once():
                 r.raise_for_status()
                 data = r.json()
                 batch = data.get('products', []) if isinstance(data, dict) else []
-
             f.write('</products>\n')
             f.flush()
             os.fsync(f.fileno())
-
         os.replace(TMP_PATH, FEED_PATH)
         with lock:
             state['last_ok'] = time.time()
@@ -182,17 +212,29 @@ def build_feed_once():
 def builder_loop():
     while True:
         build_feed_once()
+        if ENABLE_CATALOG_SYNC:
+            try:
+                run_catalog_sync()
+            except Exception as e:
+                print(json.dumps({'catalog_sync_error': f'{type(e).__name__}: {e}'}, ensure_ascii=False))
         time.sleep(REFRESH_SECONDS)
 
 
 def start_builder():
-    t = threading.Thread(target=builder_loop, name='pazaruvaj-feed-builder', daemon=True)
+    t = threading.Thread(target=builder_loop, name='bgshopping-four-hour-builder', daemon=True)
     t.start()
 
 
 @app.get('/')
 def home():
-    return jsonify(service='BGShopping Pazaruvaj Feed', feed='/pazaruvaj.xml', status='/feed-status')
+    return jsonify(
+        service='BGShopping Catalog Sync',
+        feed='/pazaruvaj.xml',
+        feed_status='/feed-status',
+        catalog_status='/catalog-status',
+        supplier_status='/supplier-status',
+        shopify_status='/shopify-sync-status',
+    )
 
 
 @app.get('/health')
@@ -208,6 +250,21 @@ def feed_status():
     if data['last_ok']:
         data['last_ok_iso'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(data['last_ok']))
     return jsonify(data)
+
+
+@app.get('/catalog-status')
+def catalog_status():
+    return jsonify(config=safe_sync_config(), status=read_json_status(CATALOG_STATUS_PATH))
+
+
+@app.get('/supplier-status')
+def supplier_status():
+    return jsonify(status=read_json_status(SUPPLIER_STATUS_PATH))
+
+
+@app.get('/shopify-sync-status')
+def shopify_sync_status():
+    return jsonify(config=safe_sync_config(), status=read_json_status(SHOPIFY_STATUS_PATH))
 
 
 @app.get('/pazaruvaj.xml')
