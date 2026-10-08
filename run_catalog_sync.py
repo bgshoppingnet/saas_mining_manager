@@ -15,34 +15,60 @@ def write_status(data):
 
 
 def install_location_fallback():
-    original = shopify_sync.discover_primary_locations
+    original_locations = shopify_sync.discover_primary_locations
+    original_inventory = shopify_sync.set_inventory
+    fallback_active = {'value': False}
 
     def discover_with_fallback(session):
         try:
-            locations = original(session)
+            locations = original_locations(session)
         except Exception:
             locations = []
         if locations:
+            fallback_active['value'] = False
             return locations
         location_id = os.getenv('SHOPIFY_LOCATION_ID', '').strip()
-        if not location_id:
-            return []
+        if location_id:
+            fallback_active['value'] = False
+            return [{
+                'id': location_id,
+                'name': os.getenv('SHOPIFY_LOCATION_NAME', 'Bulgaria primary location'),
+                'isActive': True,
+                'fulfillsOnlineOrders': True,
+                'hasActiveInventory': True,
+                'address': {
+                    'city': os.getenv('SHOPIFY_LOCATION_CITY', 'Plovdiv'),
+                    'country': 'Bulgaria',
+                    'countryCode': os.getenv('SHOPIFY_PRIMARY_COUNTRY_CODE', 'BG').strip().upper() or 'BG',
+                    'province': None,
+                    'zip': '',
+                },
+            }]
+        # Do not block product writes if Shopify location discovery is temporarily unavailable.
+        # A synthetic marker lets the main sync continue; inventory writes are skipped below.
+        fallback_active['value'] = True
         return [{
-            'id': location_id,
-            'name': os.getenv('SHOPIFY_LOCATION_NAME', 'Bulgaria primary location'),
+            'id': 'location-unavailable',
+            'name': 'Inventory update pending',
             'isActive': True,
             'fulfillsOnlineOrders': True,
-            'hasActiveInventory': True,
+            'hasActiveInventory': False,
             'address': {
-                'city': os.getenv('SHOPIFY_LOCATION_CITY', 'Plovdiv'),
+                'city': 'Plovdiv',
                 'country': 'Bulgaria',
-                'countryCode': os.getenv('SHOPIFY_PRIMARY_COUNTRY_CODE', 'BG').strip().upper() or 'BG',
+                'countryCode': 'BG',
                 'province': None,
                 'zip': '',
             },
         }]
 
+    def inventory_with_fallback(session, item, inventory_item_id, locations):
+        if fallback_active['value']:
+            return 0
+        return original_inventory(session, item, inventory_item_id, locations)
+
     shopify_sync.discover_primary_locations = discover_with_fallback
+    shopify_sync.set_inventory = inventory_with_fallback
 
 
 def run():
@@ -74,7 +100,7 @@ def run():
     result['finished_at'] = time.time()
     result['duration_seconds'] = round(result['finished_at'] - started, 2)
     write_status(result)
-    print(json.dumps(result, ensure_ascii=False))
+    print(json.dumps(result, ensure_ascii=False), flush=True)
     return result
 
 
