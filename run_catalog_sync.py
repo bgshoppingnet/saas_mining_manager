@@ -101,7 +101,6 @@ def ensure_shopify_access_token():
 
 
 def install_shopify_api_compat(shopify_sync):
-    """Apply compatibility needed by Shopify Admin API 2026-10 at runtime."""
     shopify_sync.INVENTORY_SET = '''
 mutation SetInventory($input: InventorySetQuantitiesInput!, $idempotencyKey: String!) {
   inventorySetQuantities(input: $input) @idempotent(key: $idempotencyKey) {
@@ -121,6 +120,33 @@ mutation SetInventory($input: InventorySetQuantitiesInput!, $idempotencyKey: Str
 
     shopify_sync.gql = gql_compat
     return {'inventory_idempotency': True}
+
+
+def install_canonical_duplicate_selection(shopify_sync):
+    """When Lorelli EAN/SKU exists in both new canonical and legacy products, prefer exactly one lorelli-* product."""
+    original_exact_matches = shopify_sync.exact_matches
+    stats = {'resolved': 0, 'unresolved': 0}
+
+    def exact_matches_prefer_canonical(nodes, item):
+        matches = original_exact_matches(nodes, item)
+        if len(matches) <= 1:
+            return matches
+
+        supplier = str(item.get('supplier') or '').strip().lower()
+        if supplier == 'lorelli':
+            preferred = [
+                m for m in matches
+                if str(((m.get('product') or {}).get('handle')) or '').strip().lower().startswith('lorelli-')
+            ]
+            if len(preferred) == 1:
+                stats['resolved'] += 1
+                return preferred
+
+        stats['unresolved'] += 1
+        return matches
+
+    shopify_sync.exact_matches = exact_matches_prefer_canonical
+    return stats
 
 
 def install_location_fallback(shopify_sync):
@@ -187,6 +213,7 @@ def run():
         'catalog_filter': None,
         'shopify_auth': None,
         'shopify_compat': None,
+        'duplicate_selection': None,
         'shopify': None,
         'fatal_error': None,
     }
@@ -203,8 +230,12 @@ def run():
 
         import shopify_sync
         result['shopify_compat'] = install_shopify_api_compat(shopify_sync)
+        duplicate_stats = install_canonical_duplicate_selection(shopify_sync)
+        result['duplicate_selection'] = duplicate_stats
         install_location_fallback(shopify_sync)
         result['shopify'] = shopify_sync.run()
+        result['duplicate_selection'] = duplicate_stats
+
         supplier_state = (result['suppliers'] or {}).get('state', '')
         shopify_state = (result['shopify'] or {}).get('state', '')
         if supplier_state == 'failed' or shopify_state == 'failed':
