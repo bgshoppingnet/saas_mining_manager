@@ -1,4 +1,4 @@
-import json, os, time
+import json, os, time, hashlib
 import requests
 from supplier_worker import run as run_suppliers
 
@@ -100,6 +100,29 @@ def ensure_shopify_access_token():
     }
 
 
+def install_shopify_api_compat(shopify_sync):
+    """Apply compatibility needed by Shopify Admin API 2026-10 at runtime."""
+    shopify_sync.INVENTORY_SET = '''
+mutation SetInventory($input: InventorySetQuantitiesInput!, $idempotencyKey: String!) {
+  inventorySetQuantities(input: $input) @idempotent(key: $idempotencyKey) {
+    inventoryAdjustmentGroup { createdAt reason referenceDocumentUri }
+    userErrors { field message }
+  }
+}
+'''
+    original_gql = shopify_sync.gql
+
+    def gql_compat(session, query, variables):
+        variables = dict(variables or {})
+        if 'inventorySetQuantities' in query and '@idempotent' in query and 'idempotencyKey' not in variables:
+            raw = json.dumps(variables.get('input') or {}, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+            variables['idempotencyKey'] = hashlib.sha256(raw.encode('utf-8')).hexdigest()
+        return original_gql(session, query, variables)
+
+    shopify_sync.gql = gql_compat
+    return {'inventory_idempotency': True}
+
+
 def install_location_fallback(shopify_sync):
     original_locations = shopify_sync.discover_primary_locations
     original_inventory = shopify_sync.set_inventory
@@ -163,6 +186,7 @@ def run():
         'suppliers': None,
         'catalog_filter': None,
         'shopify_auth': None,
+        'shopify_compat': None,
         'shopify': None,
         'fatal_error': None,
     }
@@ -178,6 +202,7 @@ def run():
         write_status(result)
 
         import shopify_sync
+        result['shopify_compat'] = install_shopify_api_compat(shopify_sync)
         install_location_fallback(shopify_sync)
         result['shopify'] = shopify_sync.run()
         supplier_state = (result['suppliers'] or {}).get('state', '')
