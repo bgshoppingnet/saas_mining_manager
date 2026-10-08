@@ -1,4 +1,5 @@
 import os, json, time, hashlib, re
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from urllib.parse import urlparse
 import requests
 import xml.etree.ElementTree as ET
@@ -6,6 +7,7 @@ import xml.etree.ElementTree as ET
 OUT_PATH = os.getenv('SUPPLIER_OUT_PATH', '/tmp/supplier-catalog.jsonl')
 STATUS_PATH = os.getenv('SUPPLIER_STATUS_PATH', '/tmp/supplier-status.json')
 TIMEOUT = (15, 180)
+BGN_PER_EUR = Decimal('1.95583')
 
 DEFAULT_FEEDS = [
     {"name": "Lorelli", "url": "https://lorelli.eu/ExportRssXmlFeed.aspx?token=38052958-16d5-43a7-9724-738c2550b7c1&lang=bg-bg", "enabled": True},
@@ -72,7 +74,6 @@ def is_image_url(value):
 
 
 def image_urls(node):
-    """Collect image URLs from nested XML text and attributes without relying on one supplier schema."""
     out = []
     for child in node.iter():
         if child is node:
@@ -85,7 +86,6 @@ def image_urls(node):
             if attr_value and (attr_name.lower() in {'src','href','url','image','picture'} or tag in IMAGE_TAG_HINTS):
                 candidates.append(str(attr_value).strip())
         for raw in candidates:
-            # Some feeds pack multiple image URLs in one field.
             parts = re.split(r'[\s,;|]+', raw)
             for value in parts:
                 value = value.strip().strip('"\'<>')
@@ -109,6 +109,27 @@ def descendants_with_product_shape(root):
     return candidates
 
 
+def decimal_price(value):
+    raw = str(value or '').strip().replace(' ', '').replace(',', '.')
+    try:
+        return Decimal(raw)
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def normalize_price_currency(supplier, price, currency):
+    supplier_key = str(supplier or '').strip().lower()
+    currency_key = str(currency or '').strip().upper()
+    amount = decimal_price(price)
+    if supplier_key == 'euromaster':
+        # Euromaster productfeedshops.xml publishes Bulgarian prices. Store is EUR.
+        if amount is None:
+            return price, 'EUR'
+        eur = (amount / BGN_PER_EUR).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        return format(eur, 'f'), 'EUR'
+    return price, (currency_key or 'EUR')
+
+
 def normalize(node, supplier):
     sku = text(node, {'sku','pnumber','code','product_code','item_code','model','model_code','catalog_number'})
     ean = text(node, {'ean','barcode','gtin','ean13','upc'})
@@ -118,10 +139,11 @@ def normalize(node, supplier):
     qty = text(node, {'quantity','qty','stock','availability','availability_status','available','stock_quantity'})
     url = text(node, {'url','link','product_url','product_link'})
     direct_image = text(node, IMAGE_TAG_HINTS)
-    description = text(node, {'description','description_bg','body_html','long_description','short_description'})
+    description = text(node, {'description','description_bg','body_html','long_description','short_description','short_description_bg'})
     brand = text(node, {'brand','manufacturer','vendor','make'})
-    category = text(node, {'category','category_bg','product_type','category_name'})
-    currency = text(node, {'currency','currency_code'}) or 'EUR'
+    category = text(node, {'category','category_bg','product_type','category_name','categories'})
+    currency = text(node, {'currency','currency_code'})
+    price, currency = normalize_price_currency(supplier, price, currency)
 
     images = all_values(node, IMAGE_TAG_HINTS)
     images = [v for v in images if is_image_url(v)]
