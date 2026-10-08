@@ -28,7 +28,8 @@ query FindVariants($query: String!) {
       inventoryItem { id tracked }
       product {
         id title handle vendor
-        metafield(namespace: "supplier_sync", key: "source_image_url") { value }
+        sourceImage: metafield(namespace: "supplier_sync", key: "source_image_url") { value }
+        syncFingerprint: metafield(namespace: "supplier_sync", key: "fingerprint") { value }
       }
     }
   }
@@ -243,6 +244,32 @@ def geo_metafields():
     ]
 
 
+def fingerprint_value(item):
+    return clean_text(item.get('fingerprint'))
+
+
+def existing_fingerprint(existing):
+    return clean_text((((existing.get('product') or {}).get('syncFingerprint') or {}).get('value')))
+
+
+def mark_synced(session, product_id, item):
+    fingerprint = fingerprint_value(item)
+    if not fingerprint or not product_id:
+        return
+    pdata = gql(session, PRODUCT_UPDATE, {
+        'product': {
+            'id': product_id,
+            'metafields': [
+                {'namespace':'supplier_sync','key':'fingerprint','type':'single_line_text_field','value':fingerprint}
+            ],
+        },
+        'media': None,
+    })
+    presult = pdata.get('productUpdate') or {}
+    if user_errors(presult):
+        raise RuntimeError(json.dumps(user_errors(presult), ensure_ascii=False))
+
+
 def product_update_input(item, existing):
     product = existing['product']
     p = {
@@ -262,7 +289,7 @@ def product_update_input(item, existing):
             p['handle'] = handle
             p['redirectNewHandle'] = True
     image = source_image(item)
-    old_image = (((product.get('metafield') or {}).get('value')) or '').strip()
+    old_image = ((((product.get('sourceImage') or {}).get('value')) or '')).strip()
     media = []
     if ADD_IMAGES and image and image != old_image:
         media = [{'mediaContentType':'IMAGE','originalSource':image,'alt':(clean_text(item.get('name')) or product.get('title') or '')[:512]}]
@@ -347,7 +374,7 @@ def iter_catalog():
 
 def run():
     started = time.time()
-    status = {'state':'running','write_enabled':WRITE_ENABLED,'started_at':started,'primary_market':PRIMARY_MARKET,'secondary_markets':SECONDARY_MARKETS,'primary_country_code':PRIMARY_COUNTRY_CODE,'locations':[],'matched':0,'updated':0,'created':0,'inventory_updated':0,'dry_run':0,'skipped':0,'inventory_skipped_no_location':0,'errors':[]}
+    status = {'state':'running','write_enabled':WRITE_ENABLED,'started_at':started,'primary_market':PRIMARY_MARKET,'secondary_markets':SECONDARY_MARKETS,'primary_country_code':PRIMARY_COUNTRY_CODE,'locations':[],'matched':0,'updated':0,'created':0,'unchanged':0,'inventory_updated':0,'dry_run':0,'skipped':0,'inventory_skipped_no_location':0,'errors':[]}
     session = requests.Session()
     try:
         try:
@@ -367,6 +394,10 @@ def run():
                 existing = find_existing(session, item)
                 if existing:
                     status['matched'] += 1
+                    incoming_fingerprint = fingerprint_value(item)
+                    if incoming_fingerprint and incoming_fingerprint == existing_fingerprint(existing):
+                        status['unchanged'] += 1
+                        continue
                     pinput, media = product_update_input(item, existing)
                     pdata = gql(session, PRODUCT_UPDATE, {'product':pinput, 'media':media or None})
                     presult = pdata.get('productUpdate') or {}
@@ -377,11 +408,12 @@ def run():
                     vresult = vdata.get('productVariantsBulkUpdate') or {}
                     if user_errors(vresult):
                         raise RuntimeError(json.dumps(user_errors(vresult), ensure_ascii=False))
-                    status['updated'] += 1
                     if locations:
                         status['inventory_updated'] += set_inventory(session, item, (existing.get('inventoryItem') or {}).get('id'), locations)
                     else:
                         status['inventory_skipped_no_location'] += 1
+                    mark_synced(session, existing['product']['id'], item)
+                    status['updated'] += 1
                 else:
                     new_input = build_new_product_input(item)
                     ndata = gql(session, PRODUCT_SET, {'input':new_input})
@@ -389,15 +421,17 @@ def run():
                     if user_errors(nresult):
                         raise RuntimeError(json.dumps(user_errors(nresult), ensure_ascii=False))
                     product = nresult.get('product') or {}
-                    if not product.get('id'):
+                    product_id = product.get('id')
+                    if not product_id:
                         raise RuntimeError('Shopify returned no product after create')
-                    status['created'] += 1
                     nodes = ((product.get('variants') or {}).get('nodes') or [])
                     inventory_item_id = ((nodes[0].get('inventoryItem') or {}).get('id')) if nodes else None
                     if locations:
                         status['inventory_updated'] += set_inventory(session, item, inventory_item_id, locations)
                     else:
                         status['inventory_skipped_no_location'] += 1
+                    mark_synced(session, product_id, item)
+                    status['created'] += 1
                 time.sleep(REQUEST_DELAY)
             except Exception as e:
                 status['errors'].append({'key':item.get('key'),'sku':item.get('sku'),'ean':item.get('ean'),'supplier':item.get('supplier'),'error':f'{type(e).__name__}: {e}'})
