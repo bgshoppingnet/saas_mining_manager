@@ -178,12 +178,7 @@ def build_feed_once():
                     break
                 since_id = max_id
                 request_count += 1
-                r = session.get(
-                    f'{base}{path}',
-                    params={'limit': 250, 'since_id': since_id},
-                    timeout=(10, 60),
-                    allow_redirects=True,
-                )
+                r = session.get(f'{base}{path}', params={'limit': 250, 'since_id': since_id}, timeout=(10, 60), allow_redirects=True)
                 r.raise_for_status()
                 data = r.json()
                 batch = data.get('products', []) if isinstance(data, dict) else []
@@ -209,32 +204,33 @@ def build_feed_once():
             state['building'] = False
 
 
-def builder_loop():
+def feed_loop():
     while True:
         build_feed_once()
-        if ENABLE_CATALOG_SYNC:
-            try:
-                run_catalog_sync()
-            except Exception as e:
-                print(json.dumps({'catalog_sync_error': f'{type(e).__name__}: {e}'}, ensure_ascii=False))
         time.sleep(REFRESH_SECONDS)
 
 
-def start_builder():
-    t = threading.Thread(target=builder_loop, name='bgshopping-four-hour-builder', daemon=True)
-    t.start()
+def catalog_loop():
+    if not ENABLE_CATALOG_SYNC:
+        return
+    while True:
+        try:
+            print(json.dumps({'catalog_sync':'starting'}, ensure_ascii=False), flush=True)
+            result = run_catalog_sync()
+            print(json.dumps({'catalog_sync':'finished','state':(result or {}).get('state')}, ensure_ascii=False), flush=True)
+        except Exception as e:
+            print(json.dumps({'catalog_sync_error': f'{type(e).__name__}: {e}'}, ensure_ascii=False), flush=True)
+        time.sleep(REFRESH_SECONDS)
+
+
+def start_builders():
+    threading.Thread(target=feed_loop, name='bgshopping-feed-builder', daemon=True).start()
+    threading.Thread(target=catalog_loop, name='bgshopping-catalog-sync', daemon=True).start()
 
 
 @app.get('/')
 def home():
-    return jsonify(
-        service='BGShopping Catalog Sync',
-        feed='/pazaruvaj.xml',
-        feed_status='/feed-status',
-        catalog_status='/catalog-status',
-        supplier_status='/supplier-status',
-        shopify_status='/shopify-sync-status',
-    )
+    return jsonify(service='BGShopping Catalog Sync', feed='/pazaruvaj.xml', feed_status='/feed-status', catalog_status='/catalog-status', supplier_status='/supplier-status', shopify_status='/shopify-sync-status')
 
 
 @app.get('/health')
@@ -270,22 +266,11 @@ def shopify_sync_status():
 @app.get('/pazaruvaj.xml')
 def pazaruvaj():
     if not os.path.exists(FEED_PATH):
-        return Response(
-            '<?xml version="1.0" encoding="UTF-8"?>\n<products></products>\n',
-            status=503,
-            content_type='application/xml; charset=utf-8',
-            headers={'Retry-After': '60', 'Cache-Control': 'no-store'},
-        )
-    return send_file(
-        FEED_PATH,
-        mimetype='application/xml',
-        as_attachment=False,
-        conditional=True,
-        max_age=300,
-    )
+        return Response('<?xml version="1.0" encoding="UTF-8"?>\n<products></products>\n', status=503, content_type='application/xml; charset=utf-8', headers={'Retry-After': '60', 'Cache-Control': 'no-store'})
+    return send_file(FEED_PATH, mimetype='application/xml', as_attachment=False, conditional=True, max_age=300)
 
 
-start_builder()
+start_builders()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', '10000')))
