@@ -3,6 +3,7 @@ import requests
 from supplier_worker import run as run_suppliers
 
 STATUS_PATH = os.getenv('CATALOG_SYNC_STATUS_PATH', '/tmp/catalog-sync-status.json')
+CATALOG_PATH = os.getenv('SUPPLIER_OUT_PATH', '/tmp/supplier-catalog.jsonl')
 
 
 def write_status(data):
@@ -12,6 +13,49 @@ def write_status(data):
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, STATUS_PATH)
+
+
+def filter_catalog_for_sync():
+    require_image = os.getenv('SHOPIFY_REQUIRE_IMAGE', 'false').lower() in ('1','true','yes','on')
+    max_items = int(os.getenv('SHOPIFY_MAX_ITEMS', '0') or '0')
+    if not require_image and max_items <= 0:
+        return {'enabled': False}
+    if not os.path.exists(CATALOG_PATH):
+        raise RuntimeError('Supplier catalog is missing before Shopify filter')
+
+    kept = []
+    total = 0
+    skipped_no_image = 0
+    with open(CATALOG_PATH, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            total += 1
+            item = json.loads(line)
+            image = str(item.get('image') or '').strip()
+            if require_image and not image.startswith(('http://', 'https://')):
+                skipped_no_image += 1
+                continue
+            kept.append(item)
+            if max_items > 0 and len(kept) >= max_items:
+                break
+
+    tmp = CATALOG_PATH + '.filtered.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        for item in kept:
+            f.write(json.dumps(item, ensure_ascii=False) + '\n')
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, CATALOG_PATH)
+    return {
+        'enabled': True,
+        'require_image': require_image,
+        'max_items': max_items,
+        'scanned': total,
+        'kept': len(kept),
+        'skipped_no_image': skipped_no_image,
+    }
 
 
 def ensure_shopify_access_token():
@@ -117,6 +161,7 @@ def run():
         'state': 'running',
         'started_at': started,
         'suppliers': None,
+        'catalog_filter': None,
         'shopify_auth': None,
         'shopify': None,
         'fatal_error': None,
@@ -124,6 +169,9 @@ def run():
     write_status(result)
     try:
         result['suppliers'] = run_suppliers()
+        write_status(result)
+
+        result['catalog_filter'] = filter_catalog_for_sync()
         write_status(result)
 
         result['shopify_auth'] = ensure_shopify_access_token()
