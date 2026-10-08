@@ -176,12 +176,7 @@ def gql(session, query, variables):
     if not SHOP_DOMAIN or not TOKEN:
         raise RuntimeError('Missing SHOPIFY_SHOP_DOMAIN or SHOPIFY_ADMIN_ACCESS_TOKEN')
     url = f'https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/graphql.json'
-    r = session.post(
-        url,
-        headers={'X-Shopify-Access-Token': TOKEN, 'Content-Type':'application/json'},
-        json={'query':query,'variables':variables},
-        timeout=(15,120),
-    )
+    r = session.post(url, headers={'X-Shopify-Access-Token': TOKEN, 'Content-Type':'application/json'}, json={'query':query,'variables':variables}, timeout=(15,120))
     r.raise_for_status()
     data = r.json()
     if data.get('errors'):
@@ -295,24 +290,11 @@ def set_inventory(session, item, inventory_item_id, locations):
     qty = quantity(item.get('quantity'))
     if qty is None or not inventory_item_id or not locations:
         return 0
-    # Supplier feeds normally expose one aggregate stock value. Writing it to every
-    # location would multiply total stock, so aggregate stock is assigned to the
-    # preferred/first Bulgarian fulfillment point. Per-location feed data can extend this later.
     target = locations[0]
     location_id = target['id']
     token = clean_text(item.get('key') or item.get('sku') or item.get('ean') or inventory_item_id)
     idem = hashlib.sha256(f'{token}|{location_id}|{qty}'.encode('utf-8')).hexdigest()
-    payload = {
-        'name': 'available',
-        'reason': 'correction',
-        'referenceDocumentUri': f'gid://bgshopping-catalog-sync/SupplierSync/{idem[:24]}',
-        'quantities': [{
-            'inventoryItemId': inventory_item_id,
-            'locationId': location_id,
-            'quantity': qty,
-            'changeFromQuantity': None,
-        }],
-    }
+    payload = {'name':'available','reason':'correction','referenceDocumentUri':f'gid://bgshopping-catalog-sync/SupplierSync/{idem[:24]}','quantities':[{'inventoryItemId':inventory_item_id,'locationId':location_id,'quantity':qty,'changeFromQuantity':None}]}
     data = gql(session, INVENTORY_SET, {'input': payload})
     result = data.get('inventorySetQuantities') or {}
     if user_errors(result):
@@ -342,11 +324,7 @@ def build_new_product_input(item):
     if image and ADD_IMAGES:
         p['files'] = [{'originalSource':image,'contentType':'IMAGE','alt':name[:512],'duplicateResolutionMode':'APPEND_UUID'}]
         p['metafields'].append({'namespace':'supplier_sync','key':'source_image_url','type':'url','value':image})
-    variant = {
-        'optionValues':[{'optionName':'Title','name':'Default Title'}],
-        'inventoryItem': {'tracked':True,'requiresShipping':True},
-        'inventoryPolicy': INVENTORY_POLICY,
-    }
+    variant = {'optionValues':[{'optionName':'Title','name':'Default Title'}],'inventoryItem': {'tracked':True,'requiresShipping':True},'inventoryPolicy': INVENTORY_POLICY}
     sku = clean_text(item.get('sku'))
     ean = clean_text(item.get('ean'))
     if sku: variant['inventoryItem']['sku'] = sku
@@ -369,27 +347,15 @@ def iter_catalog():
 
 def run():
     started = time.time()
-    status = {
-        'state':'running','write_enabled':WRITE_ENABLED,'started_at':started,
-        'primary_market':PRIMARY_MARKET,'secondary_markets':SECONDARY_MARKETS,
-        'primary_country_code':PRIMARY_COUNTRY_CODE,'locations':[],
-        'matched':0,'updated':0,'created':0,'inventory_updated':0,
-        'dry_run':0,'skipped':0,'errors':[],
-    }
+    status = {'state':'running','write_enabled':WRITE_ENABLED,'started_at':started,'primary_market':PRIMARY_MARKET,'secondary_markets':SECONDARY_MARKETS,'primary_country_code':PRIMARY_COUNTRY_CODE,'locations':[],'matched':0,'updated':0,'created':0,'inventory_updated':0,'dry_run':0,'skipped':0,'inventory_skipped_no_location':0,'errors':[]}
     session = requests.Session()
     try:
-        locations = discover_primary_locations(session) if TOKEN and SHOP_DOMAIN else []
-        status['locations'] = [
-            {
-                'id':x.get('id'),'name':x.get('name'),
-                'city':((x.get('address') or {}).get('city')),
-                'countryCode':((x.get('address') or {}).get('countryCode')),
-                'fulfillsOnlineOrders':x.get('fulfillsOnlineOrders'),
-            }
-            for x in locations
-        ]
-        if WRITE_ENABLED and not locations:
-            raise RuntimeError(f'No active fulfillment locations found for {PRIMARY_COUNTRY_CODE}')
+        try:
+            locations = discover_primary_locations(session) if TOKEN and SHOP_DOMAIN else []
+        except Exception as e:
+            locations = []
+            status['location_warning'] = f'{type(e).__name__}: {e}'
+        status['locations'] = [{'id':x.get('id'),'name':x.get('name'),'city':((x.get('address') or {}).get('city')),'countryCode':((x.get('address') or {}).get('countryCode')),'fulfillsOnlineOrders':x.get('fulfillsOnlineOrders')} for x in locations]
         for item in iter_catalog() or []:
             try:
                 if not clean_text(item.get('sku')) and not clean_text(item.get('ean')):
@@ -412,7 +378,10 @@ def run():
                     if user_errors(vresult):
                         raise RuntimeError(json.dumps(user_errors(vresult), ensure_ascii=False))
                     status['updated'] += 1
-                    status['inventory_updated'] += set_inventory(session, item, (existing.get('inventoryItem') or {}).get('id'), locations)
+                    if locations:
+                        status['inventory_updated'] += set_inventory(session, item, (existing.get('inventoryItem') or {}).get('id'), locations)
+                    else:
+                        status['inventory_skipped_no_location'] += 1
                 else:
                     new_input = build_new_product_input(item)
                     ndata = gql(session, PRODUCT_SET, {'input':new_input})
@@ -425,13 +394,13 @@ def run():
                     status['created'] += 1
                     nodes = ((product.get('variants') or {}).get('nodes') or [])
                     inventory_item_id = ((nodes[0].get('inventoryItem') or {}).get('id')) if nodes else None
-                    status['inventory_updated'] += set_inventory(session, item, inventory_item_id, locations)
+                    if locations:
+                        status['inventory_updated'] += set_inventory(session, item, inventory_item_id, locations)
+                    else:
+                        status['inventory_skipped_no_location'] += 1
                 time.sleep(REQUEST_DELAY)
             except Exception as e:
-                status['errors'].append({
-                    'key':item.get('key'),'sku':item.get('sku'),'ean':item.get('ean'),
-                    'supplier':item.get('supplier'),'error':f'{type(e).__name__}: {e}'
-                })
+                status['errors'].append({'key':item.get('key'),'sku':item.get('sku'),'ean':item.get('ean'),'supplier':item.get('supplier'),'error':f'{type(e).__name__}: {e}'})
         status['state'] = 'completed' if not status['errors'] else 'completed_with_errors'
     except Exception as e:
         status['state'] = 'failed'
