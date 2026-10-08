@@ -1,4 +1,5 @@
 import os, json, time, hashlib, re
+from urllib.parse import urlparse
 import requests
 import xml.etree.ElementTree as ET
 
@@ -15,6 +16,13 @@ PRODUCT_HINTS = {
     'id','product_id','item_id','name','name_bg','title','product_name','price','price_with_tax',
     'retail_price','rrp_price','sale_price','quantity','qty','stock','availability','availability_status'
 }
+
+IMAGE_TAG_HINTS = {
+    'image','image_url','picture','photo','main_image','main_picture','photos','images','gallery',
+    'image_1','image_2','image_3','image_4','image_5','image1','image2','image3','image4','image5',
+    'large_image','small_image','thumbnail','thumb','pic','media','src'
+}
+IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.webp', '.avif', '.gif')
 
 
 def feeds():
@@ -52,6 +60,40 @@ def all_values(node, names):
     return values
 
 
+def is_image_url(value):
+    value = str(value or '').strip()
+    if not value.startswith(('http://', 'https://')):
+        return False
+    try:
+        path = urlparse(value).path.lower()
+    except Exception:
+        path = value.lower().split('?', 1)[0]
+    return path.endswith(IMAGE_EXTENSIONS)
+
+
+def image_urls(node):
+    """Collect image URLs from nested XML text and attributes without relying on one supplier schema."""
+    out = []
+    for child in node.iter():
+        if child is node:
+            continue
+        tag = tag_name(child)
+        candidates = []
+        if child.text:
+            candidates.append(child.text.strip())
+        for attr_name, attr_value in child.attrib.items():
+            if attr_value and (attr_name.lower() in {'src','href','url','image','picture'} or tag in IMAGE_TAG_HINTS):
+                candidates.append(str(attr_value).strip())
+        for raw in candidates:
+            # Some feeds pack multiple image URLs in one field.
+            parts = re.split(r'[\s,;|]+', raw)
+            for value in parts:
+                value = value.strip().strip('"\'<>')
+                if is_image_url(value) and value not in out:
+                    out.append(value)
+    return out[:10]
+
+
 def descendants_with_product_shape(root):
     candidates = []
     for node in root.iter():
@@ -75,14 +117,21 @@ def normalize(node, supplier):
     price = text(node, {'price_with_tax','price','retail_price','rrp_price','sale_price','final_price','price_gross'})
     qty = text(node, {'quantity','qty','stock','availability','availability_status','available','stock_quantity'})
     url = text(node, {'url','link','product_url','product_link'})
-    image = text(node, {'image','image_url','picture','photo','main_image','main_picture'})
+    direct_image = text(node, IMAGE_TAG_HINTS)
     description = text(node, {'description','description_bg','body_html','long_description','short_description'})
     brand = text(node, {'brand','manufacturer','vendor','make'})
     category = text(node, {'category','category_bg','product_type','category_name'})
     currency = text(node, {'currency','currency_code'}) or 'EUR'
-    images = all_values(node, {'image','image_url','picture','photo','main_image','main_picture','photos','image_1','image_2','image_3','image_4','image_5'})
+
+    images = all_values(node, IMAGE_TAG_HINTS)
+    images = [v for v in images if is_image_url(v)]
+    for value in image_urls(node):
+        if value not in images:
+            images.append(value)
+    image = direct_image if is_image_url(direct_image) else (images[0] if images else '')
     if image and image not in images:
         images.insert(0, image)
+
     key = ean or sku or ext_id or (name + '|' + supplier)
     if not key.strip():
         return None
@@ -97,7 +146,7 @@ def normalize(node, supplier):
         'currency': currency,
         'quantity': qty,
         'url': url,
-        'image': image or (images[0] if images else ''),
+        'image': image,
         'images': images[:10],
         'description': description,
         'brand': brand,
@@ -155,6 +204,7 @@ def run():
                 'ok':True,'parsed':len(rows),'accepted':accepted,'rejected':rejected,'bytes':size,
                 'with_name':sum(1 for x in rows if x.get('name')),
                 'with_image':sum(1 for x in rows if x.get('image')),
+                'with_images':sum(1 for x in rows if x.get('images')),
                 'with_sku_or_ean':sum(1 for x in rows if x.get('sku') or x.get('ean')),
             }
         except Exception as e:
