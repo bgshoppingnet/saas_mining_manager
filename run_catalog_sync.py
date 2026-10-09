@@ -47,7 +47,7 @@ def run():
         'state':'running','mode':'shopify_bulk','started_at':started,
         'suppliers':None,'shopify_auth':None,
         'lorelli':None,'inventory':None,'duplicates':None,
-        'euromaster':None,'bgelectronics':None,'promotions':None,'fatal_error':None,
+        'euromaster':None,'bge_snapshot':None,'bgelectronics':None,'promotions':None,'fatal_error':None,
     }
     write_status(result)
     try:
@@ -56,6 +56,14 @@ def run():
         supplier_state = (result['suppliers'] or {}).get('state', '')
         if supplier_state == 'failed':
             raise RuntimeError('Supplier parse failed')
+
+        # The distributor's public products_feed_pro endpoint currently returns
+        # an empty body. If that happens, inject the last validated 3149-product
+        # BGElectronics snapshot hosted on Shopify CDN. This is only a fallback;
+        # a working live feed automatically wins.
+        import bge_snapshot_fallback
+        result['bge_snapshot'] = bge_snapshot_fallback.inject_if_missing()
+        write_status(result)
 
         result['shopify_auth'] = ensure_shopify_access_token()
         write_status(result)
@@ -110,7 +118,6 @@ def run():
             write_status(result)
         euromaster_state = (result['euromaster'] or {}).get('state', '') if result['euromaster'] else ''
 
-        # Next supplier: BGElectronics. Promotions are intentionally ignored.
         if euromaster_state == 'completed':
             bulk_bgelectronics_sync = importlib.reload(bulk_bgelectronics_sync)
             token = os.environ.get('SHOPIFY_ADMIN_ACCESS_TOKEN', '').strip()
@@ -123,7 +130,6 @@ def run():
             write_status(result)
         bge_state = (result['bgelectronics'] or {}).get('state', '') if result['bgelectronics'] else ''
 
-        # Keep promotions OFF globally after all current supplier writes.
         if bge_state == 'completed':
             bulk_clear_promotions = importlib.reload(bulk_clear_promotions)
             bulk_clear_promotions.core.TOKEN = os.environ.get('SHOPIFY_ADMIN_ACCESS_TOKEN', '').strip()
