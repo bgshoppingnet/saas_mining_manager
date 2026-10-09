@@ -3,47 +3,64 @@ def install(mod):
 
     def variant_fields(item, vid=None, final=False):
         value = old_variant_fields(item, vid, final)
-        # In the current Admin API SKU belongs to InventoryItemInput during
-        # productVariantsBulkUpdate, not at ProductVariantsBulkInput top level.
         value.pop('sku', None)
         sku = mod.norm(item.get('sku'))
         if sku:
             value.setdefault('inventoryItem', {})['sku'] = sku
-        # Promotions stay disabled until supplier/product promo rules are ready.
         value['compareAtPrice'] = None
         return value
+
+    def _dedup(rows):
+        return {(p['id'], (v or {}).get('id')): (p, v, supp) for p, v, supp in rows}
+
+    def _prefer_supplier(rows):
+        tagged = [x for x in rows if x[2] == 'euromaster']
+        return tagged if tagged else rows
 
     def match(item, idx):
         source, sku, ean = idx
 
-        # Strongest key first. After the first Euromaster migration every
-        # matched/created canonical product carries supplier_sync.source_key.
-        # If that exact source key identifies one Euromaster product, use it
-        # immediately and do not let legacy duplicate SKU/EAN rows turn the
-        # otherwise exact match into a conflict.
         sid = mod.low(mod.source_id(item))
         if sid and source.get(sid):
-            tagged = [x for x in source[sid] if x[2] == 'euromaster']
-            exact = tagged if tagged else source[sid]
-            p, v, conf = mod.choose(exact)
+            p, v, conf = mod.choose(_prefer_supplier(source[sid]))
             if p and not conf:
                 return p, v, False
 
-        # Fallback only when no unique source-key canonical record exists.
-        checks = []
         s = mod.low(item.get('sku'))
-        if s and sku.get(s):
-            checks.extend(sku[s])
         e = mod.low(item.get('ean'))
-        if e and ean.get(e):
-            checks.extend(ean[e])
-        dedup = {(p['id'], (v or {}).get('id')): (p, v, supp) for p, v, supp in checks}
-        return mod.choose(list(dedup.values()))
+        sku_rows = list(_dedup(sku.get(s, [])).values()) if s and sku.get(s) else []
+        ean_rows = list(_dedup(ean.get(e, [])).values()) if e and ean.get(e) else []
+
+        # When both identifiers exist, use only candidates that match both.
+        # This safely resolves legacy duplicates that share just one identifier.
+        if sku_rows and ean_rows:
+            sku_map = _dedup(sku_rows)
+            ean_map = _dedup(ean_rows)
+            common_keys = set(sku_map).intersection(ean_map)
+            common = [sku_map[k] for k in common_keys]
+            if common:
+                p, v, conf = mod.choose(_prefer_supplier(common))
+                if p and not conf:
+                    return p, v, False
+
+            # Product-level intersection can still be unique when variant IDs
+            # differ because one legacy record has incomplete variant metadata.
+            sku_products = {p['id'] for p, v, supp in sku_rows}
+            ean_products = {p['id'] for p, v, supp in ean_rows}
+            common_products = sku_products.intersection(ean_products)
+            if len(common_products) == 1:
+                pid = next(iter(common_products))
+                rows = [x for x in (sku_rows + ean_rows) if x[0]['id'] == pid]
+                p, v, conf = mod.choose(_prefer_supplier(rows))
+                if p and not conf:
+                    return p, v, False
+
+        # Final fallback is intentionally conservative.
+        fallback = sku_rows or ean_rows
+        return mod.choose(_prefer_supplier(fallback))
 
     def op(phase, digest):
-        # New operation family forces a fresh Shopify index and fresh bulk jobs
-        # after the source-key reconciliation logic changed.
-        return 'BGSEuromasterReconcileV3' + phase + digest
+        return 'BGSEuromasterReconcileV4' + phase + digest
 
     mod.variant_fields = variant_fields
     mod.match = match
