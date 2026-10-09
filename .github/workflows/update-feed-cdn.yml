@@ -1,4 +1,4 @@
-# Manual refresh trigger 2026-10-09: brand/model enrichment pipeline
+# Manual refresh trigger 2026-10-09: brand/model enrichment pipeline v2
 name: Update Feed CDN
 
 on:
@@ -75,13 +75,8 @@ jobs:
 
           path = Path('tmp-feeds/google-shopping.xml')
           text = path.read_text(encoding='utf-8')
-
-          # Shopify domestic shipping profile:
-          # 8.99 BGN standard shipping, free from 70.00 BGN, 3-5 business days.
-          # Official fixed conversion: 1 EUR = 1.95583 BGN.
           flat_eur = 4.60
           free_threshold_eur = 35.79
-
           item_re = re.compile(r'<item>(.*?)</item>', re.S)
           price_re = re.compile(r'<g:price>\s*([0-9]+(?:\.[0-9]+)?)\s+EUR\s*</g:price>', re.I)
           title_re = re.compile(r'<title>(.*?)</title>', re.S | re.I)
@@ -92,68 +87,32 @@ jobs:
           mpn_re = re.compile(r'<g:mpn>.*?</g:mpn>', re.S | re.I)
           identifier_exists_re = re.compile(r'<g:identifier_exists>.*?</g:identifier_exists>', re.S | re.I)
           existing_shipping_re = re.compile(r'<g:shipping>.*?</g:shipping>', re.S | re.I)
-
-          counters = {
-              'items': 0,
-              'shipping': 0,
-              'description_fallback': 0,
-              'identifier_false': 0,
-          }
-
+          counters = {'items':0,'shipping':0,'description_fallback':0,'identifier_false':0}
           def value(rx, body):
-              m = rx.search(body)
-              return unescape(m.group(1).strip()) if m else ''
-
+              m=rx.search(body); return unescape(m.group(1).strip()) if m else ''
           def patch_item(match):
-              body = match.group(1)
-              counters['items'] += 1
-
-              # Keep one deterministic BG product-level shipping block.
-              body = existing_shipping_re.sub('', body)
-              pm = price_re.search(body)
+              body=match.group(1); counters['items']+=1
+              body=existing_shipping_re.sub('',body)
+              pm=price_re.search(body)
               if pm:
-                  product_price = float(pm.group(1))
-                  shipping_price = 0.00 if product_price >= free_threshold_eur else flat_eur
-                  shipping = (
-                      '\n<g:shipping>'
-                      '<g:country>BG</g:country>'
-                      '<g:service>Standard</g:service>'
-                      f'<g:price>{shipping_price:.2f} EUR</g:price>'
-                      '<g:min_handling_time>0</g:min_handling_time>'
-                      '<g:max_handling_time>0</g:max_handling_time>'
-                      '<g:min_transit_time>3</g:min_transit_time>'
-                      '<g:max_transit_time>5</g:max_transit_time>'
-                      '</g:shipping>\n'
-                  )
-                  body += shipping
-                  counters['shipping'] += 1
-
+                  product_price=float(pm.group(1)); shipping_price=0.00 if product_price>=free_threshold_eur else flat_eur
+                  body += ('\n<g:shipping><g:country>BG</g:country><g:service>Standard</g:service>'
+                           f'<g:price>{shipping_price:.2f} EUR</g:price>'
+                           '<g:min_handling_time>0</g:min_handling_time><g:max_handling_time>0</g:max_handling_time>'
+                           '<g:min_transit_time>3</g:min_transit_time><g:max_transit_time>5</g:max_transit_time></g:shipping>\n')
+                  counters['shipping']+=1
               if not description_re.search(body):
-                  title = value(title_re, body)
-                  brand = value(brand_re, body)
-                  category = value(category_re, body)
-                  parts = [p for p in [title, brand, category] if p]
+                  parts=[p for p in [value(title_re,body),value(brand_re,body),value(category_re,body)] if p]
                   if parts:
-                      fallback = ' · '.join(dict.fromkeys(parts))
-                      body += f'\n<description>{escape(fallback)}</description>\n'
-                      counters['description_fallback'] += 1
-
-              has_gtin = bool(gtin_re.search(body))
-              has_mpn = bool(mpn_re.search(body))
-              body = identifier_exists_re.sub('', body)
+                      body += f'\n<description>{escape(" · ".join(dict.fromkeys(parts)))}</description>\n'; counters['description_fallback']+=1
+              has_gtin=bool(gtin_re.search(body)); has_mpn=bool(mpn_re.search(body)); body=identifier_exists_re.sub('',body)
               if not has_gtin and not has_mpn:
-                  body += '\n<g:identifier_exists>false</g:identifier_exists>\n'
-                  counters['identifier_false'] += 1
-
-              return '<item>' + body + '</item>'
-
-          patched, count = item_re.subn(patch_item, text)
-          if count < 1:
-              raise SystemExit('No Google Shopping items found to patch')
-          path.write_text(patched, encoding='utf-8')
-          print(counters)
+                  body += '\n<g:identifier_exists>false</g:identifier_exists>\n'; counters['identifier_false']+=1
+              return '<item>'+body+'</item>'
+          patched,count=item_re.subn(patch_item,text)
+          if count<1: raise SystemExit('No Google Shopping items found to patch')
+          path.write_text(patched,encoding='utf-8'); print(counters)
           PY
-
           grep -q '<g:country>BG</g:country>' tmp-feeds/google-shopping.xml
           grep -q '<g:service>Standard</g:service>' tmp-feeds/google-shopping.xml
 
@@ -168,9 +127,6 @@ jobs:
           git config user.name 'BGShopping Feed Bot'
           git config user.email 'bgshopping.net@gmail.com'
           git add feeds
-          if git diff --cached --quiet; then
-            echo 'No feed changes to publish.'
-            exit 0
-          fi
+          if git diff --cached --quiet; then echo 'No feed changes to publish.'; exit 0; fi
           git commit -m 'Refresh stable product feeds'
           git push origin HEAD:feed-cdn
