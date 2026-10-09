@@ -1,0 +1,53 @@
+name: Fix Lorelli Brand Canonicalization
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fix-lorelli-brand.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Patch canonical Lorelli mapping
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('bulk_identity_sync.py')
+          s=p.read_text(encoding='utf-8')
+          old="if low in {'loreli', 'lorelli'}:\n        return 'Lorelli'"
+          new="if low.startswith('lorelli') or low.startswith('loreli'):\n        return 'Lorelli'"
+          if old not in s:
+              if new in s:
+                  print('Lorelli canonicalization already fixed')
+              else:
+                  raise SystemExit('Expected Lorelli mapping not found')
+          else:
+              s=s.replace(old,new,1)
+              p.write_text(s,encoding='utf-8')
+          PY
+      - name: Verify and commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m py_compile bulk_identity_sync.py
+          grep -q "low.startswith('lorelli')" bulk_identity_sync.py
+          git config user.name 'BGShopping Automation'
+          git config user.email 'bgshopping.net@gmail.com'
+          git add bulk_identity_sync.py
+          if git diff --cached --quiet; then
+            echo 'No change needed.'
+            exit 0
+          fi
+          git commit -m 'Canonicalize Lorelli brand variants'
+          git push origin HEAD:main
