@@ -1,0 +1,115 @@
+name: Refresh Feeds After Generator Update
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app.py'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Wait for updated generator and verify identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/bgfeeds
+          base='https://bgshopping-pazaruvaj-feed.onrender.com'
+          ok=0
+          for i in $(seq 1 60); do
+            echo "Generator verification attempt $i"
+            code=$(curl -L -sS -o /tmp/bgfeeds/ai-products.json -w '%{http_code}' --max-time 120 "$base/ai-products.json" || true)
+            if [ "$code" = "200" ] && python - <<'PY'
+          import json
+          p='/tmp/bgfeeds/ai-products.json'
+          try:
+              data=json.load(open(p,encoding='utf-8'))
+          except Exception:
+              raise SystemExit(1)
+          items=data.get('products',[]) if isinstance(data,dict) else data
+          target='RDP-HD57'
+          x=next((v for v in items if isinstance(v,dict) and target.casefold() in ' '.join(str(v.get(k,'')) for k in ('name','model','mpn')).casefold()),None)
+          if not x: raise SystemExit(1)
+          b=x.get('brand')
+          if isinstance(b,dict): b=b.get('name','')
+          good=(str(b).casefold()=='raider' and str(x.get('model','')).casefold()==target.casefold() and str(x.get('mpn','')).casefold()==target.casefold() and str(x.get('sku','')).casefold()!=target.casefold())
+          print({'brand':b,'model':x.get('model'),'mpn':x.get('mpn'),'sku':x.get('sku'),'good':good})
+          raise SystemExit(0 if good else 1)
+          PY
+            then
+              ok=1
+              break
+            fi
+            sleep 15
+          done
+          if [ "$ok" != "1" ]; then
+            echo 'Updated canonical generator output was not observed in time.' >&2
+            exit 1
+          fi
+
+          curl -fL --retry 8 --retry-delay 5 --max-time 180 "$base/pazaruvaj.xml" -o /tmp/bgfeeds/pazaruvaj.xml
+          curl -fL --retry 8 --retry-delay 5 --max-time 180 "$base/google-shopping.xml" -o /tmp/bgfeeds/google-shopping.xml
+          curl -fL --retry 8 --retry-delay 5 --max-time 180 "$base/ai-products.json" -o /tmp/bgfeeds/ai-products.json
+
+      - name: Validate all three feeds
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json,re,html,xml.etree.ElementTree as ET
+          from pathlib import Path
+          ET.parse('/tmp/bgfeeds/pazaruvaj.xml')
+          ET.parse('/tmp/bgfeeds/google-shopping.xml')
+          data=json.loads(Path('/tmp/bgfeeds/ai-products.json').read_text(encoding='utf-8'))
+          items=data.get('products',[]) if isinstance(data,dict) else data
+          if not items: raise SystemExit('AI feed empty')
+          target='RDP-HD57'
+          def tag(body,name):
+              m=re.search(rf'<{re.escape(name)}>(.*?)</{re.escape(name)}>',body,re.S|re.I)
+              return html.unescape(m.group(1).strip()) if m else ''
+          g=Path('/tmp/bgfeeds/google-shopping.xml').read_text(encoding='utf-8')
+          gb=next((b for b in re.findall(r'<item>(.*?)</item>',g,re.S|re.I) if target.casefold() in html.unescape(b).casefold()),None)
+          if not gb or tag(gb,'g:brand').casefold()!='raider' or tag(gb,'g:mpn').casefold()!=target.casefold():
+              raise SystemExit('Google identity check failed')
+          p=Path('/tmp/bgfeeds/pazaruvaj.xml').read_text(encoding='utf-8')
+          pb=next((b for b in re.findall(r'<product>(.*?)</product>',p,re.S|re.I) if target.casefold() in html.unescape(b).casefold()),None)
+          if not pb or tag(pb,'manufacturer').casefold()!='raider':
+              raise SystemExit('Pazaruvaj brand check failed')
+          model=''
+          for a in re.findall(r'<Attribute>(.*?)</Attribute>',pb,re.S|re.I):
+              if tag(a,'Attribute_Name').casefold() in {'model','модел'}: model=tag(a,'Attribute_Value'); break
+          if model.casefold()!=target.casefold(): raise SystemExit('Pazaruvaj model check failed')
+          print('All generator identity checks passed.')
+          PY
+
+      - name: Publish verified feeds to feed-cdn
+        uses: actions/checkout@v4
+        with:
+          ref: feed-cdn
+          path: cdn
+
+      - name: Commit verified feeds atomically
+        shell: bash
+        working-directory: cdn
+        run: |
+          set -euo pipefail
+          mkdir -p feeds
+          cp /tmp/bgfeeds/pazaruvaj.xml feeds/pazaruvaj.xml
+          cp /tmp/bgfeeds/google-shopping.xml feeds/google-shopping.xml
+          cp /tmp/bgfeeds/ai-products.json feeds/ai-products.json
+          date -u +'%Y-%m-%dT%H:%M:%SZ' > feeds/last-updated.txt
+          git config user.name 'BGShopping Feed Bot'
+          git config user.email 'bgshopping.net@gmail.com'
+          git add feeds
+          if git diff --cached --quiet; then
+            echo 'Verified feeds already current.'
+            exit 0
+          fi
+          git commit -m 'Publish verified canonical brand and model feeds'
+          git push origin HEAD:feed-cdn
