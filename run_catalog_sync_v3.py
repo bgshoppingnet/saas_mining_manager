@@ -6,6 +6,7 @@ def run():
     import kikkaboo_snapshot_fallback
     import bulk_kikkaboo_sync
     import bulk_clear_promotions
+    import bulk_identity_sync
 
     started=time.time()
     base_result=__import__('run_catalog_sync_v2').run()
@@ -32,7 +33,21 @@ def run():
             bulk_clear_promotions.core.TOKEN=token
             bulk_clear_promotions.core.SHOP=shop
             result['promotions_after_kikkaboo']=bulk_clear_promotions.run()
-            result['sync_mode']='supplier_by_supplier'
+
+            # Catalog-wide identity pass: canonical Brand + true Model metafields.
+            # Runs after supplier sync so all active suppliers converge on the
+            # same custom.brand / custom.model source of truth in Shopify.
+            bulk_identity_sync=importlib.reload(bulk_identity_sync)
+            bulk_identity_sync.base.core.TOKEN=token
+            bulk_identity_sync.base.core.SHOP=shop
+            bulk_identity_sync.searchsync.base.core.TOKEN=token
+            bulk_identity_sync.searchsync.base.core.SHOP=shop
+            result['identity_sync']=bulk_identity_sync.run()
+            identity_state=(result['identity_sync'] or {}).get('state')
+            if identity_state not in ('completed','completed_with_errors'):
+                result['state']=identity_state or 'failed'
+
+            result['sync_mode']='supplier_by_supplier_plus_identity'
             result['all_supplier_stage_disabled']=True
         else:
             result['state']=(result['kikkaboo'] or {}).get('state') or 'failed'
@@ -44,7 +59,7 @@ def run():
         return result
     except Exception as e:
         result['state']='failed'
-        result['fatal_error']=f'KikkaBoo {type(e).__name__}: {e}'
+        result['fatal_error']=f'Catalog V3 {type(e).__name__}: {e}'
         result['finished_at']=time.time()
         result['duration_seconds']=round(result['finished_at']-started,2)
         write_status(result)
