@@ -26,17 +26,10 @@ jobs:
           p=Path('app.py')
           s=p.read_text(encoding='utf-8')
           marker="def mf(p,k): return str(((p.get(k) or {}).get('value')) or '').strip()\n"
-          helper="""def canonical_brand(v):
-    raw=' '.join(str(v or '').split()).strip(); low=raw.casefold()
-    if not raw:return ''
-    if low.startswith('raider'):return 'Raider'
-    if low.startswith('lorelli') or low.startswith('loreli'):return 'Lorelli'
-    if low in ('kikaboo','kikka boo','kikka-boo'):return 'KikkaBoo'
-    if low.startswith('metabo'):return 'Metabo'
-    return raw
-"""
+          helper="def canonical_brand(v):\n    raw=' '.join(str(v or '').split()).strip(); low=raw.casefold()\n    if not raw:return ''\n    if low.startswith('raider'):return 'Raider'\n    if low.startswith('lorelli') or low.startswith('loreli'):return 'Lorelli'\n    if low in ('kikaboo','kikka boo','kikka-boo'):return 'KikkaBoo'\n    if low.startswith('metabo'):return 'Metabo'\n    return raw\n"
           if 'def canonical_brand(v):' not in s:
-              if marker not in s: raise SystemExit('mf marker not found')
+              if marker not in s:
+                  raise SystemExit('mf marker not found')
               s=s.replace(marker,marker+helper,1)
           old="'brand':mf(p,'brand') or (p.get('vendor') or '').strip()"
           new="'brand':canonical_brand(mf(p,'brand') or (p.get('vendor') or '').strip())"
@@ -46,7 +39,6 @@ jobs:
               raise SystemExit('brand expression not found')
           s=s.replace("'User-Agent':'BGShopping-Commerce-Feeds/9.0'","'User-Agent':'BGShopping-Commerce-Feeds/9.1'")
           s=s.replace("version='9.0'","version='9.1'")
-          s=s.replace("ok=True,version='9.0'","ok=True,version='9.1'")
           p.write_text(s,encoding='utf-8')
           PY
           python -m py_compile app.py
