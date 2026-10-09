@@ -1,6 +1,12 @@
 name: Enrich Feed Brand Model
 
 on:
+  push:
+    branches: [feed-cdn]
+    paths:
+      - 'feeds/pazaruvaj.xml'
+      - 'feeds/google-shopping.xml'
+      - 'feeds/ai-products.json'
   workflow_run:
     workflows: ["Update Feed CDN"]
     types: [completed]
@@ -11,7 +17,7 @@ permissions:
 
 jobs:
   enrich:
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -70,12 +76,9 @@ jobs:
 
           def infer_model(title):
               text = clean(html.unescape(title))
-              # Strongest signal: manufacturer-style codes containing separators,
-              # e.g. RDP-HD57, RDI-ER14, RD-EW09, PST-BM289.
               for token in re.findall(r'\b[A-Za-zА-Яа-я0-9]+(?:[-_.+/][A-Za-zА-Яа-я0-9]+)+\b', text):
                   if plausible_code(token):
                       return token
-              # Secondary signal: compact alpha-numeric model codes, e.g. AM10B, VM45.
               for token in re.findall(r'\b[A-Za-z]{1,8}\d[A-Za-z0-9]{1,14}\b', text):
                   if plausible_code(token):
                       return token
@@ -85,8 +88,6 @@ jobs:
               m = re.search(rf'<{re.escape(tag)}>(.*?)</{re.escape(tag)}>', body, re.S | re.I)
               return html.unescape(m.group(1).strip()) if m else ''
 
-          # Pazaruvaj: keep the accepted structure and add Model as a documented
-          # product Attribute instead of inventing an unsupported top-level tag.
           p = FEEDS / 'pazaruvaj.xml'
           text = p.read_text(encoding='utf-8')
           product_re = re.compile(r'<product>(.*?)</product>', re.S | re.I)
@@ -110,7 +111,6 @@ jobs:
               raise SystemExit('No Pazaruvaj products found')
           p.write_text(text, encoding='utf-8')
 
-          # Google Merchant: canonical brand and true inferred model as MPN.
           g = FEEDS / 'google-shopping.xml'
           text = g.read_text(encoding='utf-8')
           item_re = re.compile(r'<item>(.*?)</item>', re.S | re.I)
@@ -135,8 +135,6 @@ jobs:
               raise SystemExit('No Google Shopping items found')
           g.write_text(text, encoding='utf-8')
 
-          # AI JSON-LD: retain backwards-compatible fields and add explicit
-          # schema.org model + mpn for AI/search retrieval.
           a = FEEDS / 'ai-products.json'
           data = json.loads(a.read_text(encoding='utf-8'))
           products = data.get('products') if isinstance(data, dict) else data
@@ -148,8 +146,7 @@ jobs:
                   continue
               b = item.get('brand')
               if isinstance(b, dict):
-                  bname = b.get('name')
-                  cb = canonical_brand(bname)
+                  cb = canonical_brand(b.get('name'))
                   if cb:
                       b['name'] = cb
               else:
