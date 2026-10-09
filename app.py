@@ -18,6 +18,14 @@ LABELS={'weight':'Тегло','length':'Дължина','width':'Ширина','
 def esc(v): return html.escape(str(v or ''),quote=False)
 def strip_html(s): return ' '.join(html.unescape(re.sub(r'<[^>]+>',' ',s or '')).split())
 def mf(p,k): return str(((p.get(k) or {}).get('value')) or '').strip()
+def canonical_brand(v):
+    raw=' '.join(str(v or '').split()).strip(); low=raw.casefold()
+    if not raw:return ''
+    if low.startswith('raider'):return 'Raider'
+    if low.startswith('lorelli') or low.startswith('loreli'):return 'Lorelli'
+    if low in ('kikaboo','kikka boo','kikka-boo'):return 'KikkaBoo'
+    if low.startswith('metabo'):return 'Metabo'
+    return raw
 def measures(raw):
     try: v=json.loads(raw) if raw else {}
     except Exception: return {}
@@ -48,7 +56,7 @@ def gql(session,q,vars=None):
     url=f'https://{shop}/admin/api/{SHOPIFY_API_VERSION}/graphql.json'
     for attempt in range(1,11):
         try:
-            r=session.post(url,headers={'X-Shopify-Access-Token':token,'Content-Type':'application/json','User-Agent':'BGShopping-Commerce-Feeds/9.0'},json={'query':q,'variables':vars or {}},timeout=(20,120))
+            r=session.post(url,headers={'X-Shopify-Access-Token':token,'Content-Type':'application/json','User-Agent':'BGShopping-Commerce-Feeds/9.1'},json={'query':q,'variables':vars or {}},timeout=(20,120))
             if r.status_code==429: time.sleep(min(int(r.headers.get('Retry-After') or '2'),15)); continue
             r.raise_for_status(); data=r.json(); errs=data.get('errors') or []
             if errs:
@@ -68,7 +76,7 @@ def base_data(p):
         if u and u not in imgs:imgs.append(u)
     f=((p.get('featuredImage') or {}).get('url') or '').strip()
     if f and f not in imgs:imgs.insert(0,f)
-    return {'handle':h,'brand':mf(p,'brand') or (p.get('vendor') or '').strip(),'model':mf(p,'model'),'measurements':measures(mf(p,'measurements')),'ingredients':mf(p,'ingredients'),'material':mf(p,'material'),'product_type':(p.get('productType') or '').strip(),'description':strip_html(p.get('descriptionHtml') or ''),'title':(p.get('title') or '').strip(),'images':imgs[:3]}
+    return {'handle':h,'brand':canonical_brand(mf(p,'brand') or (p.get('vendor') or '').strip()),'model':mf(p,'model'),'measurements':measures(mf(p,'measurements')),'ingredients':mf(p,'ingredients'),'material':mf(p,'material'),'product_type':(p.get('productType') or '').strip(),'description':strip_html(p.get('descriptionHtml') or ''),'title':(p.get('title') or '').strip(),'images':imgs[:3]}
 def variant(base,v):
     if not base:return None
     try: price=float(v.get('price') or 0)
@@ -184,9 +192,9 @@ def serve(path,ctype):
     with open(path,'rb') as f:payload=f.read()
     r=Response(payload,200,content_type=ctype);r.headers['Cache-Control']='public, max-age=900, stale-while-revalidate=3600';r.headers['Content-Length']=str(len(payload));r.add_etag();return r
 @app.get('/')
-def home():return jsonify(service='BGShopping Commerce Feeds',version='9.0',pazaruvaj='/pazaruvaj.xml',google_shopping='/google-shopping.xml',ai_products='/ai-products.json',feed_status='/feed-status',catalog_status='/catalog-status',supplier_status='/supplier-status',shopify_status='/shopify-sync-status')
+def home():return jsonify(service='BGShopping Commerce Feeds',version='9.1',pazaruvaj='/pazaruvaj.xml',google_shopping='/google-shopping.xml',ai_products='/ai-products.json',feed_status='/feed-status',catalog_status='/catalog-status',supplier_status='/supplier-status',shopify_status='/shopify-sync-status')
 @app.get('/health')
-def health():return jsonify(ok=True,version='9.0')
+def health():return jsonify(ok=True,version='9.1')
 @app.get('/feed-status')
 def feed_status():
     with lock:d=dict(state)
