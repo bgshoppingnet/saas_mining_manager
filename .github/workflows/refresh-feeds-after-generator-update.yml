@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'app.py'
+      - '.github/workflows/refresh-feeds-after-generator-update.yml'
   workflow_dispatch:
 
 permissions:
@@ -52,7 +53,6 @@ jobs:
             echo 'Updated canonical generator output was not observed in time.' >&2
             exit 1
           fi
-
           curl -fL --retry 8 --retry-delay 5 --max-time 180 "$base/pazaruvaj.xml" -o /tmp/bgfeeds/pazaruvaj.xml
           curl -fL --retry 8 --retry-delay 5 --max-time 180 "$base/google-shopping.xml" -o /tmp/bgfeeds/google-shopping.xml
           curl -fL --retry 8 --retry-delay 5 --max-time 180 "$base/ai-products.json" -o /tmp/bgfeeds/ai-products.json
