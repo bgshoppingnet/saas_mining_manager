@@ -1,11 +1,31 @@
-import os, json, time, hashlib
-from collections import defaultdict
+import os, json, time, hashlib, re
+from collections import defaultdict, Counter
+import xml.etree.ElementTree as ET
 import requests
 import bulk_shopify_sync as core
+import supplier_worker as sw
 
 CATALOG_PATH = os.getenv('SUPPLIER_OUT_PATH', '/tmp/supplier-catalog.jsonl')
 LOCATION_ID = os.getenv('SHOPIFY_LOCATION_ID', '').strip()
 CYCLE_SECONDS = int(os.getenv('SHOPIFY_INVENTORY_CYCLE_SECONDS', '14400') or '14400')
+LORELLI_URL = os.getenv('LORELLI_FEED_URL', sw.DEFAULT_FEEDS[0]['url'])
+
+STOCK_FIELDS = {
+    'quantity','qty','stock','stock_quantity','stock_amount','onstock','on_stock',
+    'instock','in_stock','inventory_quantity','available_quantity','free_stock',
+    'warehouse_stock','stocklevel','stock_level'
+}
+AVAIL_FIELDS = {
+    'availability','availability_status','available','is_available','instock','in_stock','onstock'
+}
+IN_STATUS = {
+    'true','yes','y','1','in stock','instock','available','available for order',
+    'да','наличен','налично','в наличност','на склад','има'
+}
+OUT_STATUS = {
+    'false','no','n','0','out of stock','outofstock','unavailable','sold out',
+    'не','изчерпан','изчерпано','няма','няма наличност'
+}
 
 
 def norm(v):
@@ -17,14 +37,27 @@ def low(v):
 
 
 def safe_int(v):
+    s = norm(v).replace(',', '.')
+    if not s:
+        return None
     try:
-        if v is None or str(v).strip() == '':
-            return None
-        return max(0, int(float(str(v).strip().replace(',', '.'))))
+        return max(0, int(float(s)))
     except Exception:
-        import re
-        m = re.search(r'-?\d+', str(v or ''))
+        m = re.search(r'-?\d+', s)
         return max(0, int(m.group(0))) if m else None
+
+
+def status_qty(v):
+    s = low(v)
+    if s in IN_STATUS:
+        return 5
+    if s in OUT_STATUS:
+        return 0
+    if any(x in s for x in ('out of stock','изчерпан','няма наличност','unavailable')):
+        return 0
+    if any(x in s for x in ('in stock','в наличност','на склад','available')):
+        return 5
+    return None
 
 
 def load_lorelli():
@@ -37,6 +70,92 @@ def load_lorelli():
             if low(x.get('supplier')) == 'lorelli':
                 rows.append(x)
     return rows
+
+
+def derive_quantity_map():
+    r = requests.get(LORELLI_URL, timeout=(15, 180), allow_redirects=True, headers={'User-Agent':'BGShopping-Inventory-Probe/1.0'})
+    r.raise_for_status()
+    root = ET.fromstring(r.content)
+    by_key = {}
+    field_counts = Counter()
+    numeric_count = 0
+    status_count = 0
+    for node in sw.descendants_with_product_shape(root):
+        sku = sw.text(node, {'sku','pnumber','code','product_code','item_code','model','model_code','catalog_number'})
+        ean = sw.text(node, {'ean','barcode','gtin','ean13','upc'})
+        ext_id = sw.text(node, {'id','product_id','item_id','offer_id'})
+        keys = [low(x) for x in (sku, ean, ext_id) if low(x)]
+        if not keys:
+            continue
+        q = None
+        # Prefer explicit numeric stock/quantity fields.
+        for child in node.iter():
+            if child is node:
+                continue
+            tag = sw.tag_name(child)
+            if tag in STOCK_FIELDS and child.text:
+                field_counts[tag] += 1
+                val = safe_int(child.text)
+                if val is not None:
+                    q = val
+                    numeric_count += 1
+                    break
+            for attr_name, attr_value in child.attrib.items():
+                an = str(attr_name).lower().replace('-', '_')
+                if an in STOCK_FIELDS:
+                    field_counts['@'+an] += 1
+                    val = safe_int(attr_value)
+                    if val is not None:
+                        q = val
+                        numeric_count += 1
+                        break
+            if q is not None:
+                break
+        # If exact quantity is absent, map explicit availability state to 5/0.
+        if q is None:
+            for child in node.iter():
+                if child is node:
+                    continue
+                tag = sw.tag_name(child)
+                if tag in AVAIL_FIELDS and child.text:
+                    field_counts[tag] += 1
+                    val = status_qty(child.text)
+                    if val is not None:
+                        q = val
+                        status_count += 1
+                        break
+                for attr_name, attr_value in child.attrib.items():
+                    an = str(attr_name).lower().replace('-', '_')
+                    if an in AVAIL_FIELDS:
+                        field_counts['@'+an] += 1
+                        val = status_qty(attr_value)
+                        if val is not None:
+                            q = val
+                            status_count += 1
+                            break
+                if q is not None:
+                    break
+        if q is not None:
+            for k in keys:
+                by_key[k] = q
+    return by_key, {
+        'source_bytes': len(r.content),
+        'mapped_keys': len(by_key),
+        'numeric_products': numeric_count,
+        'status_products': status_count,
+        'candidate_fields': dict(field_counts.most_common(20)),
+    }
+
+
+def desired_qty(item, qmap):
+    q = safe_int(item.get('quantity'))
+    if q is not None:
+        return q
+    for value in (item.get('sku'), item.get('ean'), item.get('external_id')):
+        k = low(value)
+        if k and k in qmap:
+            return qmap[k]
+    return None
 
 
 def cycle_id():
@@ -164,7 +283,7 @@ def run():
     deadline = started + int(os.getenv('SHOPIFY_BULK_MAX_WAIT_SECONDS', '680') or '680')
     cycle = cycle_id()
     status = {
-        'state': 'running', 'supplier': 'Lorelli', 'phase': 'inventory_index',
+        'state': 'running', 'supplier': 'Lorelli', 'phase': 'inventory_source',
         'cycle': cycle, 'total': 0, 'matched': 0, 'queued': 0,
         'conflicts': 0, 'missing_inventory_item': 0, 'no_quantity': 0,
         'failed': 0, 'errors': [], 'started_at': started,
@@ -177,6 +296,10 @@ def run():
     try:
         rows = load_lorelli()
         status['total'] = len(rows)
+        qmap, source_stats = derive_quantity_map()
+        status['source'] = source_stats
+        status['phase'] = 'inventory_index'
+        core.write_status(status)
         with requests.Session() as session:
             variants, op = ensure_index(session, index_name(cycle), status, deadline)
             if variants is None:
@@ -186,7 +309,7 @@ def run():
             indexes = build_indexes(variants)
             quantities = []
             for item in rows:
-                q = safe_int(item.get('quantity'))
+                q = desired_qty(item, qmap)
                 if q is None:
                     status['no_quantity'] += 1
                     continue
@@ -203,10 +326,7 @@ def run():
                     continue
                 quantities.append({'inventoryItemId': iid, 'locationId': LOCATION_ID, 'quantity': q, 'changeFromQuantity': None})
 
-            # De-duplicate by inventory item. The same desired value must win deterministically.
-            by_iid = {}
-            for x in quantities:
-                by_iid[x['inventoryItemId']] = x
+            by_iid = {x['inventoryItemId']: x for x in quantities}
             quantities = list(by_iid.values())
             status['queued'] = len(quantities)
             status['phase'] = 'inventory_write'
