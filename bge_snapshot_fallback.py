@@ -1,7 +1,10 @@
-import os, json, gzip, base64, hashlib
+import os, json, hashlib, struct
+from io import BytesIO
+import requests
+from PIL import Image
 
 CATALOG_PATH = os.getenv('SUPPLIER_OUT_PATH', '/tmp/supplier-catalog.jsonl')
-PART_DIR = os.path.join(os.path.dirname(__file__), 'data', 'bge_min_parts')
+PAYLOAD_URL = os.getenv('BGELECTRONICS_SNAPSHOT_IMAGE_URL', 'https://cdn.shopify.com/s/files/1/1044/1844/3609/files/BGShopping-BGElectronics-catalog-payload.png?v=1791510020')
 
 
 def _fingerprint(item):
@@ -9,18 +12,20 @@ def _fingerprint(item):
 
 
 def load_snapshot_rows():
-    if not os.path.isdir(PART_DIR):
-        return []
-    names = sorted(x for x in os.listdir(PART_DIR) if x.endswith('.b64'))
-    if not names:
-        return []
-    encoded = ''.join(open(os.path.join(PART_DIR, n), encoding='ascii').read().strip() for n in names)
-    raw = gzip.decompress(base64.b64decode(encoded)).decode('utf-8')
+    r = requests.get(PAYLOAD_URL, timeout=(15, 120), headers={'User-Agent':'BGShopping-Supplier-Worker/6.0'})
+    r.raise_for_status()
+    im = Image.open(BytesIO(r.content)).convert('RGB')
+    raw = im.tobytes()
+    if len(raw) < 4:
+        raise RuntimeError('BGE snapshot image is empty')
+    length = struct.unpack('>I', raw[:4])[0]
+    if length <= 0 or length > len(raw) - 4:
+        raise RuntimeError('BGE snapshot image payload length is invalid')
+    text = raw[4:4+length].decode('utf-8')
     rows = []
-    for line in raw.splitlines():
+    for line in text.splitlines():
         if not line.strip():
             continue
-        # Compact row: [id,name,EUR qty,image list,brand,category]
         pid, name, price, qty, images, brand, category = json.loads(line)
         images = [str(x).strip() for x in (images or []) if str(x).strip()]
         item = {
@@ -46,9 +51,6 @@ def load_snapshot_rows():
 
 
 def inject_if_missing():
-    rows = load_snapshot_rows()
-    if not rows:
-        return {'injected': 0, 'reason': 'snapshot_missing'}
     existing = []
     bge_found = 0
     if os.path.exists(CATALOG_PATH):
@@ -63,6 +65,9 @@ def inject_if_missing():
                     existing.append(obj)
     if bge_found:
         return {'injected': 0, 'reason': 'live_feed_present', 'existing_bge': bge_found}
+    rows = load_snapshot_rows()
+    if not rows:
+        return {'injected': 0, 'reason': 'snapshot_empty'}
     tmp = CATALOG_PATH + '.bge.tmp'
     with open(tmp, 'w', encoding='utf-8') as f:
         for obj in existing:
@@ -71,4 +76,4 @@ def inject_if_missing():
             f.write(json.dumps(obj, ensure_ascii=False) + '\n')
         f.flush(); os.fsync(f.fileno())
     os.replace(tmp, CATALOG_PATH)
-    return {'injected': len(rows), 'reason': 'embedded_snapshot'}
+    return {'injected': len(rows), 'reason': 'shopify_cdn_snapshot'}
