@@ -1,3 +1,4 @@
+# Manual refresh trigger 2026-10-09: brand/model enrichment pipeline
 name: Update Feed CDN
 
 on:
@@ -127,8 +128,6 @@ jobs:
                   body += shipping
                   counters['shipping'] += 1
 
-              # Description is required. Build a conservative fallback only from
-              # existing factual fields, never from invented specs.
               if not description_re.search(body):
                   title = value(title_re, body)
                   brand = value(brand_re, body)
@@ -139,8 +138,6 @@ jobs:
                       body += f'\n<description>{escape(fallback)}</description>\n'
                       counters['description_fallback'] += 1
 
-              # If there is neither GTIN nor MPN, explicitly tell Google the
-              # product has no known unique identifier rather than leaving it ambiguous.
               has_gtin = bool(gtin_re.search(body))
               has_mpn = bool(mpn_re.search(body))
               body = identifier_exists_re.sub('', body)
