@@ -66,6 +66,7 @@ def run():
         'shopify_auth': None,
         'shopify': None,
         'inventory': None,
+        'duplicates': None,
         'fatal_error': None,
     }
     write_status(result)
@@ -84,6 +85,8 @@ def run():
         import bulk_shopify_sync
         import bulk_shopify_sync_patch
         import bulk_inventory_sync
+        import bulk_duplicate_cleanup
+
         bulk_shopify_sync = importlib.reload(bulk_shopify_sync)
         bulk_shopify_sync_patch = importlib.reload(bulk_shopify_sync_patch)
         bulk_shopify_sync_patch.install(bulk_shopify_sync)
@@ -103,11 +106,24 @@ def run():
 
         inventory_state = (result['inventory'] or {}).get('state', '') if result['inventory'] else ''
 
-        if shopify_state == 'failed' or inventory_state == 'failed':
+        # Archive only legacy duplicate products whose every SKU/EAN is covered by
+        # exactly one canonical lorelli-* product. Ambiguous or incomplete matches
+        # remain untouched for later review.
+        if shopify_state not in ('failed', 'checkpoint_wait') and inventory_state not in ('failed', 'checkpoint_wait'):
+            bulk_duplicate_cleanup = importlib.reload(bulk_duplicate_cleanup)
+            bulk_duplicate_cleanup.core.TOKEN = os.environ.get('SHOPIFY_ADMIN_ACCESS_TOKEN', '').strip()
+            bulk_duplicate_cleanup.core.SHOP = os.environ.get('SHOPIFY_SHOP_DOMAIN', '').strip()
+            result['duplicates'] = bulk_duplicate_cleanup.run()
+            write_status(result)
+
+        duplicate_state = (result['duplicates'] or {}).get('state', '') if result['duplicates'] else ''
+
+        states = [shopify_state, inventory_state, duplicate_state]
+        if 'failed' in states:
             result['state'] = 'failed'
-        elif shopify_state == 'checkpoint_wait' or inventory_state == 'checkpoint_wait':
+        elif 'checkpoint_wait' in states:
             result['state'] = 'checkpoint_wait'
-        elif shopify_state == 'completed_with_errors' or inventory_state == 'completed_with_errors' or 'errors' in supplier_state:
+        elif 'completed_with_errors' in states or 'errors' in supplier_state:
             result['state'] = 'completed_with_errors'
         else:
             result['state'] = 'completed'
