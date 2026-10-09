@@ -10,13 +10,16 @@ def install(mod):
         sku = mod.norm(item.get('sku'))
         if sku:
             value.setdefault('inventoryItem', {})['sku'] = sku
+        # Promotions are intentionally disabled for now. Future supplier/product
+        # promotion rules will explicitly set compareAtPrice again.
+        value['compareAtPrice'] = None
         return value
 
     def op(phase, digest):
         # Previous Variant operation completed with row-level schema errors.
         # A new operation name guarantees Shopify receives the corrected JSONL.
         if phase == 'Variant':
-            return 'BGSEuromasterVariantFix2' + digest
+            return 'BGSEuromasterVariantFix3NoPromo' + digest
         return old_op(phase, digest)
 
     mod.variant_fields = variant_fields
