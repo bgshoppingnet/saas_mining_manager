@@ -1,0 +1,101 @@
+name: Stage Lorelli Brand Bulk Input
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/stage-lorelli-brand-bulk.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  stage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Build bulk mutation JSONL from Shopify export
+        shell: bash
+        env:
+          SOURCE_URL: "https://storage.googleapis.com/shopify-tiers-assets-prod-us-east1/bulk-operation-outputs/42ae0d32090f97792ade6d6c433d?GoogleAccessId=assets-us-prod%40shopify-tiers.iam.gserviceaccount.com&Expires=1792187971&Signature=l43KRlEnDLgq5XP4lTm8W4I8IK56QIrhp33%2BjgjbMjxvGTytDmEkKFeN7nUp0JsaHOkf24t55fL%2FRoNOC%2FVhcSz75yqyY4O0nDLvNvEt3z9G5DfV3VUOfOlubBF6jed%2FthWoMADTJQXa3naW5Jk0YXiDf2rZUC5JhRepEoFFwOIlHYvlGBOOsIB84RPAmVNHwp7H4RNBSLYRMOgdkzqIBg3bD9%2Fj4I58crg4aEDXVDUeJt22zG0rcVIEll4duM34G0D1D%2FzAIAiJtkETyVvs6gLTgeSv7zr4aynnHXD5gifb1NJNDmeRWvosBNVUWeIVYHPa82EVeHiH5tEZM%2BaUQA%3D%3D&response-content-disposition=attachment%3B+filename%3D%22staging-bulk-12068374217049.jsonl%22%3B+filename%2A%3DUTF-8%27%27staging-bulk-12068374217049.jsonl&response-content-type=application%2Fjsonl"
+        run: |
+          set -euo pipefail
+          curl -fL --retry 5 --retry-delay 2 "$SOURCE_URL" -o /tmp/source.jsonl
+          python - <<'PY'
+          import json
+          ids=[]
+          with open('/tmp/source.jsonl', encoding='utf-8') as f:
+              for line in f:
+                  if not line.strip():
+                      continue
+                  obj=json.loads(line)
+                  gid=str(obj.get('id') or '')
+                  if gid.startswith('gid://shopify/Product/'):
+                      ids.append(gid)
+          ids=list(dict.fromkeys(ids))
+          if not ids:
+              raise SystemExit('No Shopify product IDs found')
+          with open('/tmp/lorelli-brand-normalization.jsonl','w',encoding='utf-8',newline='\n') as out:
+              for gid in ids:
+                  variables={
+                      'metafields':[{
+                          'ownerId':gid,
+                          'namespace':'custom',
+                          'key':'brand',
+                          'type':'single_line_text_field',
+                          'value':'Lorelli'
+                      }]
+                  }
+                  out.write(json.dumps(variables,separators=(',',':'))+'\n')
+          with open('/tmp/count.txt','w') as f:
+              f.write(str(len(ids)))
+          print('Prepared',len(ids),'product updates')
+          PY
+
+      - name: Upload JSONL to Shopify staged storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import requests, json
+          url='https://shopify-staged-uploads.storage.googleapis.com/'
+          data={
+            'Content-Type':'text/jsonl',
+            'success_action_status':'201',
+            'acl':'private',
+            'key':'tmp/104418443609/bulk/87b331a1-c8c2-4efe-a8b6-f8d71beb995a/lorelli-brand-normalization.jsonl',
+            'x-goog-date':'20261009T220022Z',
+            'x-goog-credential':'merchant-assets@shopify-tiers.iam.gserviceaccount.com/20261009/auto/storage/goog4_request',
+            'x-goog-algorithm':'GOOG4-RSA-SHA256',
+            'x-goog-signature':'0c189e8e14d81b490e839fe57954893ebfad0498399226a92d818c0419db905c76be76fa9e68b986a1f521f69337fcd94a4a384dee29facab8adaac4bc2156891fe82b5c8e11d7d7c4e578372ae7b36f4eb648dfc8251cd11571e4d9daf0c0948901162954407152024059c1237deb5638f314108e31d580733628ca56da5901132c532ca7c8ee133407ab69eef014c58d2d3ed9a30639a2d36b281bd4639bafd6a728f533d63e801c0bf48aa90111b956e7921be2a3530b2a73fefdbb3a833463eb1ed5a8e6059c58df340caf0016ea702464357090bced0274677e5a865eae4512d637eb9422cf0625930b3d615df00a8de0f79ebf2a66dda4c3afdfe982e1',
+            'policy':'eyJjb25kaXRpb25zIjpbeyJDb250ZW50LVR5cGUiOiJ0ZXh0XC9qc29ubCJ9LHsic3VjY2Vzc19hY3Rpb25fc3RhdHVzIjoiMjAxIn0seyJhY2wiOiJwcml2YXRlIn0sWyJjb250ZW50LWxlbmd0aC1yYW5nZSIsMSwxMDQ4NTc2MDBdLHsiYnVja2V0Ijoic2hvcGlmeS1zdGFnZWQtdXBsb2FkcyJ9LHsia2V5IjoidG1wXC8xMDQ0MTg0NDM2MDlcL2J1bGtcLzg3YjMzMWExLWM4YzItNGVmZS1hOGI2LWY4ZDcxYmViOTk1YVwvbG9yZWxsaS1icmFuZC1ub3JtYWxpemF0aW9uLmpzb25sIn0seyJ4LWdvb2ctZGF0ZSI6IjIwMjYxMDA5VDIyMDAyMloifSx7IngtZ29vZy1jcmVkZW50aWFsIjoibWVyY2hhbnQtYXNzZXRzQHNob3BpZnktdGllcnMuaWFtLmdzZXJ2aWNlYWNjb3VudC5jb21cLzIwMjYxMDA5XC9hdXRvXC9zdG9yYWdlXC9nb29nNF9yZXF1ZXN0In0seyJ4LWdvb2ctYWxnb3JpdGhtIjoiR09PRzQtUlNBLVNIQTI1NiJ9XSwiZXhwaXJhdGlvbiI6IjIwMjYtMTAtMTBUMjI6MDA6MjJaIn0='
+          }
+          with open('/tmp/lorelli-brand-normalization.jsonl','rb') as fh:
+              r=requests.post(url,data=data,files={'file':('lorelli-brand-normalization.jsonl',fh,'text/jsonl')},timeout=120)
+          if r.status_code != 201:
+              raise SystemExit(f'Upload failed HTTP {r.status_code}: {r.text[:1000]}')
+          count=int(open('/tmp/count.txt').read())
+          status={
+            'uploaded':True,
+            'http_status':r.status_code,
+            'product_updates':count,
+            'staged_upload_path':data['key']
+          }
+          open('lorelli-bulk-stage-status.json','w',encoding='utf-8').write(json.dumps(status,indent=2)+'\n')
+          print(status)
+          PY
+
+      - name: Commit staging status
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'BGShopping Automation'
+          git config user.email 'bgshopping.net@gmail.com'
+          git add lorelli-bulk-stage-status.json
+          git commit -m 'Record Lorelli bulk staging status'
+          git push origin HEAD:main
