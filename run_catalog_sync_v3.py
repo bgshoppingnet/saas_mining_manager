@@ -6,7 +6,6 @@ def run():
     import kikkaboo_snapshot_fallback
     import bulk_kikkaboo_sync
     import bulk_clear_promotions
-    import bulk_search_discovery_sync
 
     started=time.time()
     base_result=__import__('run_catalog_sync_v2').run()
@@ -33,15 +32,8 @@ def run():
             bulk_clear_promotions.core.TOKEN=token
             bulk_clear_promotions.core.SHOP=shop
             result['promotions_after_kikkaboo']=bulk_clear_promotions.run()
-
-            bulk_search_discovery_sync=importlib.reload(bulk_search_discovery_sync)
-            bulk_search_discovery_sync.base.core.TOKEN=token
-            bulk_search_discovery_sync.base.core.SHOP=shop
-            bulk_search_discovery_sync.base.invcore.core.TOKEN=token
-            bulk_search_discovery_sync.base.invcore.core.SHOP=shop
-            result['search_discovery']=bulk_search_discovery_sync.run()
-            if (result['search_discovery'] or {}).get('state') not in ('completed','completed_with_errors'):
-                result['state']=(result['search_discovery'] or {}).get('state') or 'failed'
+            result['sync_mode']='supplier_by_supplier'
+            result['all_supplier_stage_disabled']=True
         else:
             result['state']=(result['kikkaboo'] or {}).get('state') or 'failed'
 
@@ -52,7 +44,7 @@ def run():
         return result
     except Exception as e:
         result['state']='failed'
-        result['fatal_error']=f'KikkaBoo/SearchDiscovery {type(e).__name__}: {e}'
+        result['fatal_error']=f'KikkaBoo {type(e).__name__}: {e}'
         result['finished_at']=time.time()
         result['duration_seconds']=round(result['finished_at']-started,2)
         write_status(result)
