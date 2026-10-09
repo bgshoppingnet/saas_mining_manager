@@ -47,7 +47,10 @@ def run():
         'state':'running','mode':'shopify_bulk','started_at':started,
         'suppliers':None,'shopify_auth':None,
         'lorelli':None,'inventory':None,'duplicates':None,
-        'euromaster':None,'bge_snapshot':None,'bgelectronics':None,'promotions':None,'fatal_error':None,
+        'euromaster':None,
+        'bge_snapshot':None,'bgelectronics':None,
+        'sonne_snapshot':None,'sonne':None,
+        'promotions':None,'fatal_error':None,
     }
     write_status(result)
     try:
@@ -57,12 +60,12 @@ def run():
         if supplier_state == 'failed':
             raise RuntimeError('Supplier parse failed')
 
-        # The distributor's public products_feed_pro endpoint currently returns
-        # an empty body. If that happens, inject the last validated 3149-product
-        # BGElectronics snapshot hosted on Shopify CDN. This is only a fallback;
-        # a working live feed automatically wins.
         import bge_snapshot_fallback
         result['bge_snapshot'] = bge_snapshot_fallback.inject_if_missing()
+        write_status(result)
+
+        import sonne_snapshot_fallback
+        result['sonne_snapshot'] = sonne_snapshot_fallback.inject_if_missing()
         write_status(result)
 
         result['shopify_auth'] = ensure_shopify_access_token()
@@ -76,6 +79,8 @@ def run():
         import bulk_euromaster_sync
         import bulk_euromaster_sync_patch
         import bulk_bgelectronics_sync
+        import bulk_bgelectronics_patch
+        import bulk_sonne_sync
         import bulk_clear_promotions
 
         bulk_shopify_sync = importlib.reload(bulk_shopify_sync)
@@ -120,6 +125,8 @@ def run():
 
         if euromaster_state == 'completed':
             bulk_bgelectronics_sync = importlib.reload(bulk_bgelectronics_sync)
+            bulk_bgelectronics_patch = importlib.reload(bulk_bgelectronics_patch)
+            bulk_bgelectronics_patch.install(bulk_bgelectronics_sync)
             token = os.environ.get('SHOPIFY_ADMIN_ACCESS_TOKEN', '').strip()
             shop = os.environ.get('SHOPIFY_SHOP_DOMAIN', '').strip()
             bulk_bgelectronics_sync.core.TOKEN = token
@@ -131,6 +138,18 @@ def run():
         bge_state = (result['bgelectronics'] or {}).get('state', '') if result['bgelectronics'] else ''
 
         if bge_state == 'completed':
+            bulk_sonne_sync = importlib.reload(bulk_sonne_sync)
+            token = os.environ.get('SHOPIFY_ADMIN_ACCESS_TOKEN', '').strip()
+            shop = os.environ.get('SHOPIFY_SHOP_DOMAIN', '').strip()
+            bulk_sonne_sync.base.core.TOKEN = token
+            bulk_sonne_sync.base.core.SHOP = shop
+            bulk_sonne_sync.base.invcore.core.TOKEN = token
+            bulk_sonne_sync.base.invcore.core.SHOP = shop
+            result['sonne'] = bulk_sonne_sync.run()
+            write_status(result)
+        sonne_state = (result['sonne'] or {}).get('state', '') if result['sonne'] else ''
+
+        if sonne_state == 'completed':
             bulk_clear_promotions = importlib.reload(bulk_clear_promotions)
             bulk_clear_promotions.core.TOKEN = os.environ.get('SHOPIFY_ADMIN_ACCESS_TOKEN', '').strip()
             bulk_clear_promotions.core.SHOP = os.environ.get('SHOPIFY_SHOP_DOMAIN', '').strip()
@@ -138,7 +157,7 @@ def run():
             write_status(result)
         promotion_state = (result['promotions'] or {}).get('state', '') if result['promotions'] else ''
 
-        states=[lorelli_state,inventory_state,duplicate_state,euromaster_state,bge_state,promotion_state]
+        states=[lorelli_state,inventory_state,duplicate_state,euromaster_state,bge_state,sonne_state,promotion_state]
         if 'failed' in states:
             result['state']='failed'
         elif 'checkpoint_wait' in states:
