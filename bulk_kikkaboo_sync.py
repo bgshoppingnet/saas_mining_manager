@@ -5,6 +5,7 @@ import bulk_bgelectronics_sync as base
 def run():
     mod=importlib.reload(base)
     matched_variant_ids={}
+    conflict_examples=[]
 
     def load_rows():
         out=[]
@@ -20,7 +21,7 @@ def run():
         return out
 
     def op(phase,d):
-        return 'BGSKikkaBooV2'+phase+d
+        return 'BGSKikkaBooV3'+phase+d
 
     def product_metafields(item):
         fields=[
@@ -55,6 +56,18 @@ def run():
             k=mod.low(raw)
             if k:
                 matched_variant_ids[k]=v['id']
+
+    def sample_conflict(item):
+        if len(conflict_examples)>=25:
+            return
+        conflict_examples.append({
+            'source_id':mod.source_id(item),
+            'sku':mod.norm(item.get('sku')),
+            'ean':mod.norm(item.get('ean')),
+            'name':mod.norm(item.get('name'))[:180],
+            'brand':mod.norm(item.get('brand'))[:80],
+            'url':mod.norm(item.get('url'))[:300],
+        })
 
     def exact_one(cands):
         if not cands:
@@ -108,6 +121,7 @@ def run():
 
         union={(p['id'],(v or {}).get('id')):(p,v,supp) for p,v,supp in sc+ec}
         if union:
+            sample_conflict(item)
             return None,None,True
         return None,None,False
 
@@ -182,6 +196,8 @@ def run():
     def write_status(status):
         if isinstance(status,dict) and status.get('supplier')=='BGElectronics':
             status['supplier']='KikkaBoo'
+        if isinstance(status,dict) and status.get('supplier')=='KikkaBoo' and conflict_examples:
+            status['conflict_examples']=list(conflict_examples)
         old_write(status)
 
     mod.load_rows=load_rows
@@ -197,6 +213,8 @@ def run():
         result=mod.run()
         if isinstance(result,dict):
             result['supplier']='KikkaBoo'
+            if conflict_examples:
+                result['conflict_examples']=list(conflict_examples)
         return result
     finally:
         mod.invcore.match=old_inventory_match
