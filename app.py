@@ -1,4 +1,4 @@
-from flask import Flask, Response, jsonify, send_file
+from flask import Flask, Response, jsonify
 import os, html, requests, re, threading, time, json
 from urllib.parse import quote
 from run_catalog_sync_v3 import run as run_catalog_sync
@@ -15,7 +15,7 @@ TMP_PATH = '/tmp/pazaruvaj.xml.tmp'
 CATALOG_STATUS_PATH = os.getenv('CATALOG_SYNC_STATUS_PATH', '/tmp/catalog-sync-status.json')
 SUPPLIER_STATUS_PATH = os.getenv('SUPPLIER_STATUS_PATH', '/tmp/supplier-status.json')
 SHOPIFY_STATUS_PATH = os.getenv('SHOPIFY_SYNC_STATUS_PATH', '/tmp/shopify-sync-status.json')
-state = {'building': False, 'last_ok': None, 'last_error': None, 'products': 0, 'variants': 0}
+state = {'building': False, 'last_ok': None, 'last_error': None, 'products': 0, 'variants': 0, 'bytes': 0}
 lock = threading.Lock()
 
 
@@ -67,32 +67,43 @@ def product_xml(p):
     images = p.get('images') or []
     chunks = []
     variants = 0
+
+    if not handle:
+        return '', 0
+
     for v in p.get('variants') or []:
         if not v.get('available', True):
             continue
+
+        price = v.get('price') or '0'
+        try:
+            gross = float(price)
+            if gross <= 0:
+                continue
+            net = gross / (1 + VAT_RATE)
+        except Exception:
+            continue
+
         variants += 1
         vid = v.get('id', '')
+        sku = (v.get('sku') or '').strip()
+        barcode = (v.get('barcode') or '').strip()
+        identifier = sku or barcode or str(vid)
+
         title = p.get('title', '')
         vtitle = v.get('title', '')
         if vtitle and vtitle != 'Default Title':
             title = f'{title} - {vtitle}'
-        price = v.get('price') or '0'
-        try:
-            gross = float(price)
-            net = gross / (1 + VAT_RATE)
-        except Exception:
-            net = 0
+
         link = f'{PUBLIC_SHOP_URL}/products/{quote(handle)}?variant={vid}'
-        sku = v.get('sku', '')
-        barcode = v.get('barcode') or ''
         parts = [
             '<product>',
-            f'<identifier>{esc(vid)}</identifier>',
+            f'<identifier>{esc(identifier)}</identifier>',
             f'<manufacturer>{esc(vendor)}</manufacturer>',
             f'<name>{esc(title)}</name>',
             f'<category>{esc(ptype)}</category>',
             f'<product_url>{esc(link)}</product_url>',
-            f'<price>{esc(price)}</price>',
+            f'<price>{gross:.2f}</price>',
             f'<net_price>{net:.2f}</net_price>',
         ]
         if sku:
@@ -102,7 +113,7 @@ def product_xml(p):
         if desc:
             parts.append(f'<description>{esc(desc)}</description>')
         for i, img in enumerate(images[:3], start=1):
-            src = img.get('src') or ''
+            src = (img.get('src') or '').strip()
             if src:
                 parts.append(f'<image{i}>{esc(src)}</image{i}>')
         parts.append('<delivery_time>1</delivery_time>')
@@ -138,23 +149,26 @@ def choose_source(session):
 def build_feed_once():
     with lock:
         if state['building']:
-            return
+            return False
         state['building'] = True
         state['last_error'] = None
+
     try:
         session = requests.Session()
         session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (compatible; BGShopping-Pazaruvaj-Feed/5.0; +https://bgshopping.net)',
+            'User-Agent': 'Mozilla/5.0 (compatible; BGShopping-Pazaruvaj-Feed/6.0; +https://bgshopping.net)',
             'Accept': 'application/json,text/plain,*/*',
         })
-        base, path, batch, _ = choose_source(session)
+        base, path, batch, probes = choose_source(session)
         if not base:
-            raise RuntimeError('No Shopify JSON product source returned products')
+            raise RuntimeError(f'No Shopify JSON product source returned products: {probes}')
+
         seen = set()
         since_id = 0
         product_count = 0
         variant_count = 0
         request_count = 0
+
         with open(TMP_PATH, 'w', encoding='utf-8', newline='\n') as f:
             f.write('<?xml version="1.0" encoding="UTF-8"?>\n<products>\n')
             while batch and request_count < 500:
@@ -169,28 +183,48 @@ def build_feed_once():
                             max_id = max(max_id, int(pid))
                         except Exception:
                             pass
+
                     xml, variants = product_xml(p)
                     if xml:
                         f.write(xml)
                         variant_count += variants
-                    product_count += 1
+                        product_count += 1
+
                 if len(batch) < 250 or max_id <= since_id:
                     break
+
                 since_id = max_id
                 request_count += 1
                 r = session.get(f'{base}{path}', params={'limit': 250, 'since_id': since_id}, timeout=(10, 60), allow_redirects=True)
                 r.raise_for_status()
                 data = r.json()
                 batch = data.get('products', []) if isinstance(data, dict) else []
+
             f.write('</products>\n')
             f.flush()
             os.fsync(f.fileno())
+
+        size = os.path.getsize(TMP_PATH)
+        if product_count <= 0 or variant_count <= 0 or size < 100:
+            raise RuntimeError(f'Feed integrity check failed: products={product_count}, variants={variant_count}, bytes={size}')
+
         os.replace(TMP_PATH, FEED_PATH)
         with lock:
             state['last_ok'] = time.time()
             state['products'] = product_count
             state['variants'] = variant_count
+            state['bytes'] = size
             state['last_error'] = None
+
+        print(json.dumps({
+            'feed_build': 'completed',
+            'products': product_count,
+            'variants': variant_count,
+            'bytes': size,
+            'source': f'{base}{path}',
+        }, ensure_ascii=False), flush=True)
+        return True
+
     except Exception as e:
         try:
             if os.path.exists(TMP_PATH):
@@ -199,6 +233,9 @@ def build_feed_once():
             pass
         with lock:
             state['last_error'] = f'{type(e).__name__}: {e}'
+        print(json.dumps({'feed_build': 'failed', 'error': state['last_error']}, ensure_ascii=False), flush=True)
+        return False
+
     finally:
         with lock:
             state['building'] = False
@@ -242,7 +279,8 @@ def health():
 def feed_status():
     with lock:
         data = dict(state)
-    data['ready'] = os.path.exists(FEED_PATH)
+    data['ready'] = os.path.exists(FEED_PATH) and os.path.getsize(FEED_PATH) > 100 if os.path.exists(FEED_PATH) else False
+    data['file_bytes'] = os.path.getsize(FEED_PATH) if os.path.exists(FEED_PATH) else 0
     if data['last_ok']:
         data['last_ok_iso'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(data['last_ok']))
     return jsonify(data)
@@ -265,9 +303,44 @@ def shopify_sync_status():
 
 @app.get('/pazaruvaj.xml')
 def pazaruvaj():
-    if not os.path.exists(FEED_PATH):
-        return Response('<?xml version="1.0" encoding="UTF-8"?>\n<products></products>\n', status=503, content_type='application/xml; charset=utf-8', headers={'Retry-After': '60', 'Cache-Control': 'no-store'})
-    return send_file(FEED_PATH, mimetype='application/xml', as_attachment=False, conditional=True, max_age=300)
+    if not os.path.exists(FEED_PATH) or os.path.getsize(FEED_PATH) <= 100:
+        return Response(
+            '<?xml version="1.0" encoding="UTF-8"?>\n<products></products>\n',
+            status=503,
+            content_type='application/xml; charset=utf-8',
+            headers={'Retry-After': '60', 'Cache-Control': 'no-store'},
+        )
+
+    try:
+        with open(FEED_PATH, 'rb') as f:
+            payload = f.read()
+    except Exception as e:
+        return Response(
+            f'<?xml version="1.0" encoding="UTF-8"?>\n<error>{esc(type(e).__name__)}</error>\n',
+            status=503,
+            content_type='application/xml; charset=utf-8',
+            headers={'Retry-After': '60', 'Cache-Control': 'no-store'},
+        )
+
+    if len(payload) <= 100 or b'<product>' not in payload:
+        return Response(
+            '<?xml version="1.0" encoding="UTF-8"?>\n<products></products>\n',
+            status=503,
+            content_type='application/xml; charset=utf-8',
+            headers={'Retry-After': '60', 'Cache-Control': 'no-store'},
+        )
+
+    return Response(
+        payload,
+        status=200,
+        content_type='application/xml; charset=utf-8',
+        headers={
+            'Cache-Control': 'public, max-age=300',
+            'Content-Length': str(len(payload)),
+            'X-BGShopping-Feed-Products': str(state.get('products', 0)),
+            'X-BGShopping-Feed-Variants': str(state.get('variants', 0)),
+        },
+    )
 
 
 start_builders()
