@@ -15,12 +15,12 @@ TMP_PATH = '/tmp/pazaruvaj.xml.tmp'
 CATALOG_STATUS_PATH = os.getenv('CATALOG_SYNC_STATUS_PATH', '/tmp/catalog-sync-status.json')
 SUPPLIER_STATUS_PATH = os.getenv('SUPPLIER_STATUS_PATH', '/tmp/supplier-status.json')
 SHOPIFY_STATUS_PATH = os.getenv('SHOPIFY_SYNC_STATUS_PATH', '/tmp/shopify-sync-status.json')
-state = {'building': False, 'last_ok': None, 'last_error': None, 'products': 0, 'variants': 0, 'bytes': 0}
+state = {'building': False, 'last_ok': None, 'last_error': None, 'products': 0, 'variants': 0, 'bytes': 0, 'pages': 0}
 lock = threading.Lock()
 
 PRODUCTS_QUERY = '''
 query FeedProducts($cursor: String) {
-  products(first: 100, after: $cursor, query: "status:active", sortKey: ID) {
+  products(first: 250, after: $cursor, query: "status:active", sortKey: ID) {
     pageInfo { hasNextPage endCursor }
     nodes {
       id
@@ -88,8 +88,6 @@ def safe_sync_config():
         'shopify_client_id_configured': bool(os.getenv('SHOPIFY_CLIENT_ID', '').strip()),
         'shopify_client_secret_configured': bool(os.getenv('SHOPIFY_CLIENT_SECRET', '').strip()),
         'shopify_location_configured': bool(os.getenv('SHOPIFY_LOCATION_ID', '').strip()),
-        'fix_handles': os.getenv('SHOPIFY_FIX_HANDLES', 'false').lower() in ('1','true','yes','on'),
-        'add_images': os.getenv('SHOPIFY_ADD_IMAGES', 'true').lower() in ('1','true','yes','on'),
     }
 
 
@@ -104,7 +102,7 @@ def admin_gql(session, query, variables=None):
         headers={
             'X-Shopify-Access-Token': token,
             'Content-Type': 'application/json',
-            'User-Agent': 'BGShopping-Pazaruvaj-Feed/7.1',
+            'User-Agent': 'BGShopping-Pazaruvaj-Feed/7.2',
         },
         json={'query': query, 'variables': variables or {}},
         timeout=(20, 120),
@@ -120,7 +118,6 @@ def product_xml(p):
     handle = (p.get('handle') or '').strip()
     if not handle:
         return '', 0
-
     vendor = (p.get('vendor') or '').strip()
     ptype = (p.get('productType') or '').strip()
     desc = strip_html(p.get('descriptionHtml') or '')
@@ -198,6 +195,7 @@ def build_feed_once():
             return False
         state['building'] = True
         state['last_error'] = None
+        state['pages'] = 0
 
     try:
         auth = ensure_shopify_access_token()
@@ -221,6 +219,19 @@ def build_feed_once():
                         product_count += 1
                         variant_count += variants
 
+                with lock:
+                    state['pages'] = page
+                    state['products'] = product_count
+                    state['variants'] = variant_count
+
+                if page == 1 or page % 10 == 0:
+                    print(json.dumps({
+                        'feed_build': 'progress',
+                        'page': page,
+                        'products': product_count,
+                        'variants': variant_count,
+                    }, ensure_ascii=False), flush=True)
+
                 pi = conn.get('pageInfo') or {}
                 if not pi.get('hasNextPage'):
                     break
@@ -242,6 +253,7 @@ def build_feed_once():
             state['products'] = product_count
             state['variants'] = variant_count
             state['bytes'] = size
+            state['pages'] = page
             state['last_error'] = None
 
         print(json.dumps({
@@ -265,7 +277,6 @@ def build_feed_once():
             state['last_error'] = f'{type(e).__name__}: {e}'
         print(json.dumps({'feed_build': 'failed', 'error': state['last_error']}, ensure_ascii=False), flush=True)
         return False
-
     finally:
         with lock:
             state['building'] = False
