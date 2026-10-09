@@ -39,6 +39,7 @@ query FeedProducts($cursor: String) {
           barcode
           price
           availableForSale
+          image { url }
         }
       }
     }
@@ -106,7 +107,7 @@ def admin_gql(session, query, variables=None):
                 headers={
                     'X-Shopify-Access-Token': token,
                     'Content-Type': 'application/json',
-                    'User-Agent': 'BGShopping-Pazaruvaj-Feed/7.3',
+                    'User-Agent': 'BGShopping-Pazaruvaj-Feed/7.4',
                 },
                 json={'query': query, 'variables': variables or {}},
                 timeout=(20, 120),
@@ -147,15 +148,14 @@ def product_xml(p):
     ptype = (p.get('productType') or '').strip()
     desc = strip_html(p.get('descriptionHtml') or '')
     image_nodes = ((p.get('images') or {}).get('nodes') or [])[:3]
-    image_urls = []
+    product_image_urls = []
     for img in image_nodes:
-        url = (img or {}).get('url') or ''
-        if url and url not in image_urls:
-            image_urls.append(url)
-    if not image_urls:
-        featured = ((p.get('featuredImage') or {}).get('url') or '').strip()
-        if featured:
-            image_urls.append(featured)
+        url = ((img or {}).get('url') or '').strip()
+        if url and url not in product_image_urls:
+            product_image_urls.append(url)
+    featured = ((p.get('featuredImage') or {}).get('url') or '').strip()
+    if featured and featured not in product_image_urls:
+        product_image_urls.insert(0, featured)
 
     chunks = []
     variants = 0
@@ -188,6 +188,17 @@ def product_xml(p):
         if vid:
             link += f'?variant={vid}'
 
+        # Prefer the exact variant image, then fill with product-level images.
+        image_urls = []
+        variant_image = (((v.get('image') or {}).get('url')) or '').strip()
+        if variant_image:
+            image_urls.append(variant_image)
+        for src in product_image_urls:
+            if src and src not in image_urls:
+                image_urls.append(src)
+            if len(image_urls) >= 3:
+                break
+
         parts = [
             '<product>',
             f'<identifier>{esc(identifier)}</identifier>',
@@ -204,8 +215,9 @@ def product_xml(p):
             parts.append(f'<ean>{esc(barcode)}</ean>')
         if desc:
             parts.append(f'<description>{esc(desc)}</description>')
-        for i, src in enumerate(image_urls, start=1):
-            parts.append(f'<image{i}>{esc(src)}</image{i}>')
+        for i, src in enumerate(image_urls[:3], start=1):
+            tag = 'Image_url' if i == 1 else f'Image_url_{i}'
+            parts.append(f'<{tag}>{esc(src)}</{tag}>')
         parts.append('<delivery_time>1</delivery_time>')
         parts.append('</product>')
         chunks.append('\n'.join(parts) + '\n')
