@@ -1,0 +1,195 @@
+name: Enrich Feed Brand Model
+
+on:
+  workflow_run:
+    workflows: ["Update Feed CDN"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  enrich:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout stable feed branch
+        uses: actions/checkout@v4
+        with:
+          ref: feed-cdn
+
+      - name: Add canonical brand and model metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import html
+          import json
+          import re
+          from pathlib import Path
+          from xml.sax.saxutils import escape
+
+          FEEDS = Path('feeds')
+
+          def clean(value):
+              return ' '.join(str(value or '').split()).strip()
+
+          def canonical_brand(value):
+              raw = clean(value)
+              low = raw.casefold()
+              if not raw:
+                  return ''
+              if low.startswith('raider'):
+                  return 'Raider'
+              if low in {'kikaboo', 'kikka boo', 'kikka-boo'}:
+                  return 'KikkaBoo'
+              if low in {'loreli', 'lorelli'}:
+                  return 'Lorelli'
+              if low.startswith('metabo'):
+                  return 'Metabo'
+              return raw
+
+          UNIT_CODES = {
+              'V','W','KW','MM','CM','M','KG','G','ML','L','AH','MAH','RPM','NM','HZ','DB','MPA','BAR'
+          }
+
+          def plausible_code(token):
+              t = clean(token).strip('.,;:()[]{}')
+              if len(t) < 4 or len(t) > 40:
+                  return False
+              compact = re.sub(r'[-_.+/]', '', t)
+              if not compact:
+                  return False
+              if compact.upper() in UNIT_CODES:
+                  return False
+              if re.fullmatch(r'\d+(?:\.\d+)?(?:V|W|KW|MM|CM|M|KG|G|ML|L|AH|MAH|RPM|NM|HZ|DB|MPA|BAR)', t, re.I):
+                  return False
+              return any(c.isalpha() for c in t) and any(c.isdigit() for c in t)
+
+          def infer_model(title):
+              text = clean(html.unescape(title))
+              # Strongest signal: manufacturer-style codes containing separators,
+              # e.g. RDP-HD57, RDI-ER14, RD-EW09, PST-BM289.
+              for token in re.findall(r'\b[A-Za-zА-Яа-я0-9]+(?:[-_.+/][A-Za-zА-Яа-я0-9]+)+\b', text):
+                  if plausible_code(token):
+                      return token
+              # Secondary signal: compact alpha-numeric model codes, e.g. AM10B, VM45.
+              for token in re.findall(r'\b[A-Za-z]{1,8}\d[A-Za-z0-9]{1,14}\b', text):
+                  if plausible_code(token):
+                      return token
+              return ''
+
+          def tag_value(body, tag):
+              m = re.search(rf'<{re.escape(tag)}>(.*?)</{re.escape(tag)}>', body, re.S | re.I)
+              return html.unescape(m.group(1).strip()) if m else ''
+
+          # Pazaruvaj: keep the accepted structure and add Model as a documented
+          # product Attribute instead of inventing an unsupported top-level tag.
+          p = FEEDS / 'pazaruvaj.xml'
+          text = p.read_text(encoding='utf-8')
+          product_re = re.compile(r'<product>(.*?)</product>', re.S | re.I)
+          def patch_pazar(match):
+              body = match.group(1)
+              title = tag_value(body, 'name')
+              manufacturer = tag_value(body, 'manufacturer')
+              brand = canonical_brand(manufacturer)
+              model = infer_model(title)
+              if manufacturer and brand and brand != manufacturer:
+                  body = re.sub(r'<manufacturer>.*?</manufacturer>', f'<manufacturer>{escape(brand)}</manufacturer>', body, count=1, flags=re.S | re.I)
+              has_model = re.search(r'<Attribute_Name>\s*(?:Модел|Model)\s*</Attribute_Name>', body, re.I)
+              if model and not has_model:
+                  body += ('\n<Attribute>'
+                           '<Attribute_Name>Модел</Attribute_Name>'
+                           f'<Attribute_Value>{escape(model)}</Attribute_Value>'
+                           '</Attribute>\n')
+              return '<product>' + body + '</product>'
+          text, pcount = product_re.subn(patch_pazar, text)
+          if pcount < 1:
+              raise SystemExit('No Pazaruvaj products found')
+          p.write_text(text, encoding='utf-8')
+
+          # Google Merchant: canonical brand and true inferred model as MPN.
+          g = FEEDS / 'google-shopping.xml'
+          text = g.read_text(encoding='utf-8')
+          item_re = re.compile(r'<item>(.*?)</item>', re.S | re.I)
+          def patch_google(match):
+              body = match.group(1)
+              title = tag_value(body, 'title')
+              brand_m = re.search(r'<g:brand>(.*?)</g:brand>', body, re.S | re.I)
+              if brand_m:
+                  old = html.unescape(brand_m.group(1).strip())
+                  new = canonical_brand(old)
+                  if new and new != old:
+                      body = body[:brand_m.start()] + f'<g:brand>{escape(new)}</g:brand>' + body[brand_m.end():]
+              model = infer_model(title)
+              if model:
+                  if re.search(r'<g:mpn>.*?</g:mpn>', body, re.S | re.I):
+                      body = re.sub(r'<g:mpn>.*?</g:mpn>', f'<g:mpn>{escape(model)}</g:mpn>', body, count=1, flags=re.S | re.I)
+                  else:
+                      body += f'\n<g:mpn>{escape(model)}</g:mpn>\n'
+              return '<item>' + body + '</item>'
+          text, gcount = item_re.subn(patch_google, text)
+          if gcount < 1:
+              raise SystemExit('No Google Shopping items found')
+          g.write_text(text, encoding='utf-8')
+
+          # AI JSON-LD: retain backwards-compatible fields and add explicit
+          # schema.org model + mpn for AI/search retrieval.
+          a = FEEDS / 'ai-products.json'
+          data = json.loads(a.read_text(encoding='utf-8'))
+          products = data.get('products') if isinstance(data, dict) else data
+          if not isinstance(products, list) or not products:
+              raise SystemExit('No AI products found')
+          enriched = 0
+          for item in products:
+              if not isinstance(item, dict):
+                  continue
+              b = item.get('brand')
+              if isinstance(b, dict):
+                  bname = b.get('name')
+                  cb = canonical_brand(bname)
+                  if cb:
+                      b['name'] = cb
+              else:
+                  cb = canonical_brand(b)
+                  if cb:
+                      item['brand'] = cb
+              model = clean(item.get('model')) or infer_model(item.get('name'))
+              if model:
+                  item['model'] = model
+                  item['mpn'] = model
+                  enriched += 1
+          a.write_text(json.dumps(data, ensure_ascii=False, separators=(',', ':')) + '\n', encoding='utf-8')
+          print({'pazaruvaj_products': pcount, 'google_items': gcount, 'ai_products': len(products), 'ai_models': enriched})
+          PY
+
+      - name: Validate enriched feeds
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, xml.etree.ElementTree as ET
+          ET.parse('feeds/pazaruvaj.xml')
+          ET.parse('feeds/google-shopping.xml')
+          with open('feeds/ai-products.json', encoding='utf-8') as f:
+              data=json.load(f)
+          products=data.get('products', []) if isinstance(data, dict) else data
+          if not products:
+              raise SystemExit('AI feed has no products')
+          PY
+
+      - name: Publish enrichment
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'BGShopping Feed Bot'
+          git config user.email 'bgshopping.net@gmail.com'
+          git add feeds/pazaruvaj.xml feeds/google-shopping.xml feeds/ai-products.json
+          if git diff --cached --quiet; then
+            echo 'No brand/model enrichment changes.'
+            exit 0
+          fi
+          git commit -m 'Enrich feeds with canonical brand and model metadata'
+          git push origin HEAD:feed-cdn
