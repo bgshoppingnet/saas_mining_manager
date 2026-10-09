@@ -2,14 +2,13 @@ from flask import Flask, Response, jsonify
 import os, html, requests, re, threading, time, json
 from urllib.parse import quote
 from run_catalog_sync_v3 import run as run_catalog_sync
+from run_catalog_sync import ensure_shopify_access_token
 
 app = Flask(__name__)
 PUBLIC_SHOP_URL = os.getenv('PUBLIC_SHOP_URL', 'https://bgshopping.net').rstrip('/')
 VAT_RATE = float(os.getenv('VAT_RATE', '0.20'))
 REFRESH_SECONDS = int(os.getenv('REFRESH_SECONDS', '14400'))
 ENABLE_CATALOG_SYNC = os.getenv('ENABLE_CATALOG_SYNC', 'true').lower() in ('1', 'true', 'yes', 'on')
-SHOPIFY_SHOP_DOMAIN = os.getenv('SHOPIFY_SHOP_DOMAIN', '').strip()
-SHOPIFY_ADMIN_ACCESS_TOKEN = os.getenv('SHOPIFY_ADMIN_ACCESS_TOKEN', '').strip()
 SHOPIFY_API_VERSION = os.getenv('SHOPIFY_API_VERSION', '2026-10').strip()
 FEED_PATH = '/tmp/pazaruvaj.xml'
 TMP_PATH = '/tmp/pazaruvaj.xml.tmp'
@@ -84,8 +83,10 @@ def safe_sync_config():
         'refresh_seconds': REFRESH_SECONDS,
         'supplier_feed_count': feed_count,
         'shopify_write_enabled': os.getenv('SHOPIFY_WRITE_ENABLED', 'false').lower() in ('1','true','yes','on'),
-        'shopify_domain_configured': bool(SHOPIFY_SHOP_DOMAIN),
-        'shopify_token_configured': bool(SHOPIFY_ADMIN_ACCESS_TOKEN),
+        'shopify_domain_configured': bool(os.getenv('SHOPIFY_SHOP_DOMAIN', '').strip()),
+        'shopify_token_configured': bool(os.getenv('SHOPIFY_ADMIN_ACCESS_TOKEN', '').strip()),
+        'shopify_client_id_configured': bool(os.getenv('SHOPIFY_CLIENT_ID', '').strip()),
+        'shopify_client_secret_configured': bool(os.getenv('SHOPIFY_CLIENT_SECRET', '').strip()),
         'shopify_location_configured': bool(os.getenv('SHOPIFY_LOCATION_ID', '').strip()),
         'fix_handles': os.getenv('SHOPIFY_FIX_HANDLES', 'false').lower() in ('1','true','yes','on'),
         'add_images': os.getenv('SHOPIFY_ADD_IMAGES', 'true').lower() in ('1','true','yes','on'),
@@ -93,15 +94,17 @@ def safe_sync_config():
 
 
 def admin_gql(session, query, variables=None):
-    if not SHOPIFY_SHOP_DOMAIN or not SHOPIFY_ADMIN_ACCESS_TOKEN:
-        raise RuntimeError('Shopify Admin API is not configured')
-    url = f'https://{SHOPIFY_SHOP_DOMAIN}/admin/api/{SHOPIFY_API_VERSION}/graphql.json'
+    shop = os.getenv('SHOPIFY_SHOP_DOMAIN', '').strip()
+    token = os.getenv('SHOPIFY_ADMIN_ACCESS_TOKEN', '').strip()
+    if not shop or not token:
+        raise RuntimeError('Shopify Admin API is not configured after authentication')
+    url = f'https://{shop}/admin/api/{SHOPIFY_API_VERSION}/graphql.json'
     r = session.post(
         url,
         headers={
-            'X-Shopify-Access-Token': SHOPIFY_ADMIN_ACCESS_TOKEN,
+            'X-Shopify-Access-Token': token,
             'Content-Type': 'application/json',
-            'User-Agent': 'BGShopping-Pazaruvaj-Feed/7.0',
+            'User-Agent': 'BGShopping-Pazaruvaj-Feed/7.1',
         },
         json={'query': query, 'variables': variables or {}},
         timeout=(20, 120),
@@ -137,7 +140,6 @@ def product_xml(p):
     for v in ((p.get('variants') or {}).get('nodes') or []):
         if not v.get('availableForSale', False):
             continue
-
         try:
             gross = float(v.get('price') or 0)
             if gross <= 0:
@@ -198,6 +200,7 @@ def build_feed_once():
         state['last_error'] = None
 
     try:
+        auth = ensure_shopify_access_token()
         session = requests.Session()
         product_count = 0
         variant_count = 0
@@ -248,6 +251,7 @@ def build_feed_once():
             'bytes': size,
             'source': 'Shopify Admin GraphQL',
             'pages': page,
+            'auth_mode': (auth or {}).get('mode'),
         }, ensure_ascii=False), flush=True)
         return True
 
