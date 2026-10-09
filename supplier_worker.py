@@ -12,12 +12,14 @@ BGN_PER_EUR = Decimal('1.95583')
 DEFAULT_FEEDS = [
     {"name": "Lorelli", "url": "https://lorelli.eu/ExportRssXmlFeed.aspx?token=38052958-16d5-43a7-9724-738c2550b7c1&lang=bg-bg", "enabled": True},
     {"name": "Euromaster", "url": "https://www.euromasterbg.com/feeds/productfeedshops.xml", "enabled": True},
+    {"name": "BGElectronics", "url": "https://www.bgelectronics.eu/index.php?route=feed/products_feed_pro", "enabled": True},
 ]
 
 PRODUCT_HINTS = {
     'sku','pnumber','code','product_code','item_code','model','ean','barcode','gtin','ean13',
     'id','product_id','item_id','name','name_bg','title','product_name','price','price_with_tax',
-    'retail_price','rrp_price','sale_price','quantity','qty','stock','availability','availability_status'
+    'retail_price','rrp_price','sale_price','end_price','dealer_price','quantity','qty','stock',
+    'availability','availability_status','in_stock'
 }
 
 IMAGE_TAG_HINTS = {
@@ -122,8 +124,7 @@ def normalize_price_currency(supplier, price, currency):
     supplier_key = str(supplier or '').strip().lower()
     currency_key = str(currency or '').strip().upper()
     amount = decimal_price(price)
-    if supplier_key == 'euromaster':
-        # Euromaster productfeedshops.xml publishes Bulgarian prices. Store is EUR.
+    if supplier_key in {'euromaster','bgelectronics'}:
         if amount is None:
             return price, 'EUR'
         eur = (amount / BGN_PER_EUR).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
@@ -132,18 +133,33 @@ def normalize_price_currency(supplier, price, currency):
 
 
 def normalize(node, supplier):
+    supplier_key = str(supplier or '').strip().lower()
     sku = text(node, {'sku','pnumber','code','product_code','item_code','model','model_code','catalog_number'})
     ean = text(node, {'ean','barcode','gtin','ean13','upc'})
     ext_id = text(node, {'id','product_id','item_id','offer_id'})
     name = text(node, {'name','name_bg','title','product_name','title_bg'})
-    price = text(node, {'price_with_tax','price','retail_price','rrp_price','sale_price','final_price','price_gross'})
-    qty = text(node, {'quantity','qty','stock','availability','availability_status','available','stock_quantity'})
+
+    if supplier_key == 'bgelectronics':
+        # Regular customer price only. Supplier promo field CustumerPromotionPrice
+        # is intentionally ignored until BGShopping promotions are re-enabled.
+        price = text(node, {'end_price'})
+        in_stock = text(node, {'in_stock'}).strip().lower()
+        qty = '5' if in_stock in {'1','true','yes','да'} else '0'
+        description = text(node, {'product_description','description'})
+        category = text(node, {'category_full','category_name','category'})
+        currency = 'BGN'
+        if not sku:
+            sku = ext_id
+    else:
+        price = text(node, {'price_with_tax','price','retail_price','rrp_price','sale_price','final_price','price_gross'})
+        qty = text(node, {'quantity','qty','stock','availability','availability_status','available','stock_quantity'})
+        description = text(node, {'description','description_bg','body_html','long_description','short_description','short_description_bg'})
+        category = text(node, {'category','category_bg','product_type','category_name','categories'})
+        currency = text(node, {'currency','currency_code'})
+
     url = text(node, {'url','link','product_url','product_link'})
     direct_image = text(node, {'image','image_url','picture','photo','main_image','main_picture'})
-    description = text(node, {'description','description_bg','body_html','long_description','short_description','short_description_bg'})
     brand = text(node, {'brand','manufacturer','vendor','make'})
-    category = text(node, {'category','category_bg','product_type','category_name','categories'})
-    currency = text(node, {'currency','currency_code'})
     price, currency = normalize_price_currency(supplier, price, currency)
 
     images = all_values(node, IMAGE_TAG_HINTS)
@@ -178,15 +194,15 @@ def normalize(node, supplier):
 
 
 def fetch_feed(session, cfg):
-    # The Euromaster XML is ~60 MB. Stream item-by-item so a free Render
-    # instance does not hold the complete XML tree in memory.
-    if str(cfg.get('name') or '').strip().lower() == 'euromaster':
-        r = session.get(cfg['url'], timeout=TIMEOUT, allow_redirects=True, stream=True, headers={'User-Agent':'BGShopping-Supplier-Worker/3.0'})
+    supplier_key = str(cfg.get('name') or '').strip().lower()
+    if supplier_key in {'euromaster','bgelectronics'}:
+        r = session.get(cfg['url'], timeout=TIMEOUT, allow_redirects=True, stream=True, headers={'User-Agent':'BGShopping-Supplier-Worker/4.0'})
         r.raise_for_status()
         r.raw.decode_content = True
         rows = []
+        wanted_tag = 'item' if supplier_key == 'euromaster' else 'product'
         for event, node in ET.iterparse(r.raw, events=('end',)):
-            if tag_name(node) != 'item':
+            if tag_name(node) != wanted_tag:
                 continue
             item = normalize(node, cfg['name'])
             if item:
@@ -195,7 +211,7 @@ def fetch_feed(session, cfg):
         size = int(r.headers.get('Content-Length') or 0)
         return rows, size
 
-    r = session.get(cfg['url'], timeout=TIMEOUT, allow_redirects=True, headers={'User-Agent':'BGShopping-Supplier-Worker/3.0'})
+    r = session.get(cfg['url'], timeout=TIMEOUT, allow_redirects=True, headers={'User-Agent':'BGShopping-Supplier-Worker/4.0'})
     r.raise_for_status()
     root = ET.fromstring(r.content)
     rows = []
@@ -233,8 +249,6 @@ def run():
                 if not identity or not identity.strip():
                     rejected += 1
                     continue
-                # Supplier namespace is part of the key so two distributors with the
-                # same EAN/SKU don't erase each other before Shopify matching.
                 dedupe_key = name.strip().lower() + '|' + identity.strip().lower()
                 if dedupe_key in merged:
                     duplicates += 1
