@@ -11,6 +11,7 @@ BGN_PER_EUR = Decimal('1.95583')
 
 DEFAULT_FEEDS = [
     {"name": "Lorelli", "url": "https://lorelli.eu/ExportRssXmlFeed.aspx?token=38052958-16d5-43a7-9724-738c2550b7c1&lang=bg-bg", "enabled": True},
+    {"name": "Euromaster", "url": "https://www.euromasterbg.com/feeds/productfeedshops.xml", "enabled": True},
 ]
 
 PRODUCT_HINTS = {
@@ -22,7 +23,7 @@ PRODUCT_HINTS = {
 IMAGE_TAG_HINTS = {
     'image','image_url','picture','photo','main_image','main_picture','photos','images','gallery',
     'image_1','image_2','image_3','image_4','image_5','image1','image2','image3','image4','image5',
-    'large_image','small_image','thumbnail','thumb','pic','media','src'
+    'large_image','small_image','thumbnail','thumb','pic','media','src','additional_images'
 }
 IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.webp', '.avif', '.gif')
 
@@ -138,7 +139,7 @@ def normalize(node, supplier):
     price = text(node, {'price_with_tax','price','retail_price','rrp_price','sale_price','final_price','price_gross'})
     qty = text(node, {'quantity','qty','stock','availability','availability_status','available','stock_quantity'})
     url = text(node, {'url','link','product_url','product_link'})
-    direct_image = text(node, IMAGE_TAG_HINTS)
+    direct_image = text(node, {'image','image_url','picture','photo','main_image','main_picture'})
     description = text(node, {'description','description_bg','body_html','long_description','short_description','short_description_bg'})
     brand = text(node, {'brand','manufacturer','vendor','make'})
     category = text(node, {'category','category_bg','product_type','category_name','categories'})
@@ -177,7 +178,24 @@ def normalize(node, supplier):
 
 
 def fetch_feed(session, cfg):
-    r = session.get(cfg['url'], timeout=TIMEOUT, allow_redirects=True, headers={'User-Agent':'BGShopping-Supplier-Worker/2.0'})
+    # The Euromaster XML is ~60 MB. Stream item-by-item so a free Render
+    # instance does not hold the complete XML tree in memory.
+    if str(cfg.get('name') or '').strip().lower() == 'euromaster':
+        r = session.get(cfg['url'], timeout=TIMEOUT, allow_redirects=True, stream=True, headers={'User-Agent':'BGShopping-Supplier-Worker/3.0'})
+        r.raise_for_status()
+        r.raw.decode_content = True
+        rows = []
+        for event, node in ET.iterparse(r.raw, events=('end',)):
+            if tag_name(node) != 'item':
+                continue
+            item = normalize(node, cfg['name'])
+            if item:
+                rows.append(item)
+            node.clear()
+        size = int(r.headers.get('Content-Length') or 0)
+        return rows, size
+
+    r = session.get(cfg['url'], timeout=TIMEOUT, allow_redirects=True, headers={'User-Agent':'BGShopping-Supplier-Worker/3.0'})
     r.raise_for_status()
     root = ET.fromstring(r.content)
     rows = []
@@ -211,11 +229,13 @@ def run():
             accepted = 0
             rejected = 0
             for item in rows:
-                key = item['ean'] or item['sku'] or item['external_id'] or item['key']
-                if not key or not key.strip():
+                identity = item['ean'] or item['sku'] or item['external_id'] or item['key']
+                if not identity or not identity.strip():
                     rejected += 1
                     continue
-                dedupe_key = key.strip().lower()
+                # Supplier namespace is part of the key so two distributors with the
+                # same EAN/SKU don't erase each other before Shopify matching.
+                dedupe_key = name.strip().lower() + '|' + identity.strip().lower()
                 if dedupe_key in merged:
                     duplicates += 1
                     continue
