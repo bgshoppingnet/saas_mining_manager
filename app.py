@@ -10,12 +10,31 @@ VAT_RATE = float(os.getenv('VAT_RATE', '0.20'))
 REFRESH_SECONDS = int(os.getenv('REFRESH_SECONDS', '14400'))
 ENABLE_CATALOG_SYNC = os.getenv('ENABLE_CATALOG_SYNC', 'true').lower() in ('1', 'true', 'yes', 'on')
 SHOPIFY_API_VERSION = os.getenv('SHOPIFY_API_VERSION', '2026-10').strip()
-FEED_PATH = '/tmp/pazaruvaj.xml'
-TMP_PATH = '/tmp/pazaruvaj.xml.tmp'
+
+PAZARUVAJ_PATH = '/tmp/pazaruvaj.xml'
+PAZARUVAJ_TMP = '/tmp/pazaruvaj.xml.tmp'
+GOOGLE_PATH = '/tmp/google-shopping.xml'
+GOOGLE_TMP = '/tmp/google-shopping.xml.tmp'
+AI_PATH = '/tmp/ai-products.json'
+AI_TMP = '/tmp/ai-products.json.tmp'
+
 CATALOG_STATUS_PATH = os.getenv('CATALOG_SYNC_STATUS_PATH', '/tmp/catalog-sync-status.json')
 SUPPLIER_STATUS_PATH = os.getenv('SUPPLIER_STATUS_PATH', '/tmp/supplier-status.json')
 SHOPIFY_STATUS_PATH = os.getenv('SHOPIFY_SYNC_STATUS_PATH', '/tmp/shopify-sync-status.json')
-state = {'building': False, 'last_ok': None, 'last_error': None, 'products': 0, 'variants': 0, 'bytes': 0, 'pages': 0}
+
+state = {
+    'building': False,
+    'last_ok': None,
+    'last_error': None,
+    'products': 0,
+    'variants': 0,
+    'bytes': 0,
+    'pages': 0,
+    'google_items': 0,
+    'google_bytes': 0,
+    'ai_items': 0,
+    'ai_bytes': 0,
+}
 lock = threading.Lock()
 
 PRODUCTS_QUERY = '''
@@ -107,7 +126,7 @@ def admin_gql(session, query, variables=None):
                 headers={
                     'X-Shopify-Access-Token': token,
                     'Content-Type': 'application/json',
-                    'User-Agent': 'BGShopping-Pazaruvaj-Feed/7.4',
+                    'User-Agent': 'BGShopping-Commerce-Feeds/8.0',
                 },
                 json={'query': query, 'variables': variables or {}},
                 timeout=(20, 120),
@@ -140,93 +159,168 @@ def admin_gql(session, query, variables=None):
     raise RuntimeError(f'Shopify Admin GraphQL retries exhausted: {last_error}')
 
 
-def product_xml(p):
+def base_product_data(p):
     handle = (p.get('handle') or '').strip()
     if not handle:
-        return '', 0
-    vendor = (p.get('vendor') or '').strip()
-    ptype = (p.get('productType') or '').strip()
-    desc = strip_html(p.get('descriptionHtml') or '')
+        return None
     image_nodes = ((p.get('images') or {}).get('nodes') or [])[:3]
-    product_image_urls = []
+    product_images = []
     for img in image_nodes:
         url = ((img or {}).get('url') or '').strip()
-        if url and url not in product_image_urls:
-            product_image_urls.append(url)
+        if url and url not in product_images:
+            product_images.append(url)
     featured = ((p.get('featuredImage') or {}).get('url') or '').strip()
-    if featured and featured not in product_image_urls:
-        product_image_urls.insert(0, featured)
-
-    chunks = []
-    variants = 0
-    for v in ((p.get('variants') or {}).get('nodes') or []):
-        if not v.get('availableForSale', False):
-            continue
-        try:
-            gross = float(v.get('price') or 0)
-            if gross <= 0:
-                continue
-            net = gross / (1 + VAT_RATE)
-        except Exception:
-            continue
-
-        vid = numeric_gid(v.get('id'))
-        sku = (v.get('sku') or '').strip()
-        barcode = (v.get('barcode') or '').strip()
-        identifier = sku or barcode or vid
-        if not identifier:
-            continue
-
-        title = (p.get('title') or '').strip()
-        vtitle = (v.get('title') or '').strip()
-        if vtitle and vtitle != 'Default Title':
-            title = f'{title} - {vtitle}'
-        if not title:
-            continue
-
-        link = f'{PUBLIC_SHOP_URL}/products/{quote(handle)}'
-        if vid:
-            link += f'?variant={vid}'
-
-        # Prefer the exact variant image, then fill with product-level images.
-        image_urls = []
-        variant_image = (((v.get('image') or {}).get('url')) or '').strip()
-        if variant_image:
-            image_urls.append(variant_image)
-        for src in product_image_urls:
-            if src and src not in image_urls:
-                image_urls.append(src)
-            if len(image_urls) >= 3:
-                break
-
-        parts = [
-            '<product>',
-            f'<identifier>{esc(identifier)}</identifier>',
-            f'<manufacturer>{esc(vendor)}</manufacturer>',
-            f'<name>{esc(title)}</name>',
-            f'<category>{esc(ptype)}</category>',
-            f'<product_url>{esc(link)}</product_url>',
-            f'<price>{gross:.2f}</price>',
-            f'<net_price>{net:.2f}</net_price>',
-        ]
-        if sku:
-            parts.append(f'<sku>{esc(sku)}</sku>')
-        if barcode:
-            parts.append(f'<ean>{esc(barcode)}</ean>')
-        if desc:
-            parts.append(f'<description>{esc(desc)}</description>')
-        for i, src in enumerate(image_urls[:3], start=1):
-            tag = 'Image_url' if i == 1 else f'Image_url_{i}'
-            parts.append(f'<{tag}>{esc(src)}</{tag}>')
-        parts.append('<delivery_time>1</delivery_time>')
-        parts.append('</product>')
-        chunks.append('\n'.join(parts) + '\n')
-        variants += 1
-
-    return ''.join(chunks), variants
+    if featured and featured not in product_images:
+        product_images.insert(0, featured)
+    return {
+        'handle': handle,
+        'vendor': (p.get('vendor') or '').strip(),
+        'product_type': (p.get('productType') or '').strip(),
+        'description': strip_html(p.get('descriptionHtml') or ''),
+        'title': (p.get('title') or '').strip(),
+        'images': product_images[:3],
+    }
 
 
-def build_feed_once():
+def variant_data(base, v):
+    if not base:
+        return None
+    try:
+        gross = float(v.get('price') or 0)
+        if gross <= 0:
+            return None
+    except Exception:
+        return None
+
+    vid = numeric_gid(v.get('id'))
+    sku = (v.get('sku') or '').strip()
+    barcode = (v.get('barcode') or '').strip()
+    identifier = sku or barcode or vid
+    if not identifier:
+        return None
+
+    title = base['title']
+    vtitle = (v.get('title') or '').strip()
+    if vtitle and vtitle != 'Default Title':
+        title = f'{title} - {vtitle}'
+    if not title:
+        return None
+
+    link = f"{PUBLIC_SHOP_URL}/products/{quote(base['handle'])}"
+    if vid:
+        link += f'?variant={vid}'
+
+    images = []
+    variant_image = (((v.get('image') or {}).get('url')) or '').strip()
+    if variant_image:
+        images.append(variant_image)
+    for src in base['images']:
+        if src and src not in images:
+            images.append(src)
+        if len(images) >= 3:
+            break
+
+    return {
+        'id': identifier,
+        'variant_id': vid,
+        'sku': sku,
+        'barcode': barcode,
+        'title': title,
+        'description': base['description'],
+        'brand': base['vendor'],
+        'product_type': base['product_type'],
+        'link': link,
+        'price': gross,
+        'net_price': gross / (1 + VAT_RATE),
+        'available': bool(v.get('availableForSale', False)),
+        'images': images[:3],
+    }
+
+
+def pazaruvaj_xml_item(d):
+    if not d or not d['available']:
+        return ''
+    parts = [
+        '<product>',
+        f"<identifier>{esc(d['id'])}</identifier>",
+        f"<manufacturer>{esc(d['brand'])}</manufacturer>",
+        f"<name>{esc(d['title'])}</name>",
+        f"<category>{esc(d['product_type'])}</category>",
+        f"<product_url>{esc(d['link'])}</product_url>",
+        f"<price>{d['price']:.2f}</price>",
+        f"<net_price>{d['net_price']:.2f}</net_price>",
+    ]
+    if d['sku']:
+        parts.append(f"<sku>{esc(d['sku'])}</sku>")
+    if d['barcode']:
+        parts.append(f"<ean>{esc(d['barcode'])}</ean>")
+    if d['description']:
+        parts.append(f"<description>{esc(d['description'])}</description>")
+    for i, src in enumerate(d['images'], start=1):
+        tag = 'Image_url' if i == 1 else f'Image_url_{i}'
+        parts.append(f'<{tag}>{esc(src)}</{tag}>')
+    parts.append('<delivery_time>1</delivery_time>')
+    parts.append('</product>')
+    return '\n'.join(parts) + '\n'
+
+
+def google_xml_item(d):
+    if not d:
+        return ''
+    availability = 'in_stock' if d['available'] else 'out_of_stock'
+    parts = [
+        '<item>',
+        f"<g:id>{esc(d['id'])}</g:id>",
+        f"<title>{esc(d['title'])}</title>",
+        f"<link>{esc(d['link'])}</link>",
+        f"<g:availability>{availability}</g:availability>",
+        '<g:condition>new</g:condition>',
+        f"<g:price>{d['price']:.2f} EUR</g:price>",
+    ]
+    if d['description']:
+        parts.append(f"<description>{esc(d['description'])}</description>")
+    if d['brand']:
+        parts.append(f"<g:brand>{esc(d['brand'])}</g:brand>")
+    if d['product_type']:
+        parts.append(f"<g:product_type>{esc(d['product_type'])}</g:product_type>")
+    if d['barcode']:
+        parts.append(f"<g:gtin>{esc(d['barcode'])}</g:gtin>")
+    elif d['sku']:
+        parts.append(f"<g:mpn>{esc(d['sku'])}</g:mpn>")
+    if d['images']:
+        parts.append(f"<g:image_link>{esc(d['images'][0])}</g:image_link>")
+        for src in d['images'][1:]:
+            parts.append(f"<g:additional_image_link>{esc(src)}</g:additional_image_link>")
+    parts.append('</item>')
+    return '\n'.join(parts) + '\n'
+
+
+def ai_json_item(d):
+    if not d:
+        return None
+    item = {
+        '@type': 'Product',
+        'id': d['id'],
+        'name': d['title'],
+        'url': d['link'],
+        'image': d['images'],
+        'brand': d['brand'] or None,
+        'category': d['product_type'] or None,
+        'sku': d['sku'] or None,
+        'gtin': d['barcode'] or None,
+        'description': d['description'] or None,
+        'offers': {
+            '@type': 'Offer',
+            'price': f"{d['price']:.2f}",
+            'priceCurrency': 'EUR',
+            'availability': 'https://schema.org/InStock' if d['available'] else 'https://schema.org/OutOfStock',
+            'url': d['link'],
+        },
+    }
+    return item
+
+
+def build_feeds_once():
     with lock:
         if state['building']:
             return False
@@ -237,32 +331,80 @@ def build_feed_once():
     try:
         auth = ensure_shopify_access_token()
         session = requests.Session()
-        product_count = 0
-        variant_count = 0
+        pazar_products = 0
+        pazar_variants = 0
+        google_items = 0
+        ai_items = 0
         cursor = None
         page = 0
+        first_ai = True
 
-        with open(TMP_PATH, 'w', encoding='utf-8', newline='\n') as f:
-            f.write('<?xml version="1.0" encoding="UTF-8"?>\n<products>\n')
+        with open(PAZARUVAJ_TMP, 'w', encoding='utf-8', newline='\n') as pf, \
+             open(GOOGLE_TMP, 'w', encoding='utf-8', newline='\n') as gf, \
+             open(AI_TMP, 'w', encoding='utf-8', newline='\n') as af:
+
+            pf.write('<?xml version="1.0" encoding="UTF-8"?>\n<products>\n')
+            gf.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+            gf.write('<rss version="2.0" xmlns:g="http://base.google.com/ns/1.0">\n<channel>\n')
+            gf.write('<title>BGShopping.net Product Feed</title>\n')
+            gf.write(f'<link>{esc(PUBLIC_SHOP_URL)}</link>\n')
+            gf.write('<description>BGShopping.net product catalog for shopping channels</description>\n')
+            af.write('{"@context":"https://schema.org","generated_at":')
+            af.write(json.dumps(time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())))
+            af.write(',"currency":"EUR","products":[\n')
+
             while True:
                 page += 1
                 data = admin_gql(session, PRODUCTS_QUERY, {'cursor': cursor})
                 conn = data.get('products') or {}
                 nodes = conn.get('nodes') or []
+
                 for p in nodes:
-                    xml, variants = product_xml(p)
-                    if xml:
-                        f.write(xml)
-                        product_count += 1
-                        variant_count += variants
+                    base = base_product_data(p)
+                    wrote_pazar_product = False
+                    for v in ((p.get('variants') or {}).get('nodes') or []):
+                        d = variant_data(base, v)
+                        if not d:
+                            continue
+
+                        px = pazaruvaj_xml_item(d)
+                        if px:
+                            pf.write(px)
+                            pazar_variants += 1
+                            wrote_pazar_product = True
+
+                        gx = google_xml_item(d)
+                        if gx:
+                            gf.write(gx)
+                            google_items += 1
+
+                        ai = ai_json_item(d)
+                        if ai:
+                            if not first_ai:
+                                af.write(',\n')
+                            af.write(json.dumps(ai, ensure_ascii=False, separators=(',', ':')))
+                            first_ai = False
+                            ai_items += 1
+
+                    if wrote_pazar_product:
+                        pazar_products += 1
 
                 with lock:
                     state['pages'] = page
-                    state['products'] = product_count
-                    state['variants'] = variant_count
+                    state['products'] = pazar_products
+                    state['variants'] = pazar_variants
+                    state['google_items'] = google_items
+                    state['ai_items'] = ai_items
 
                 if page == 1 or page % 10 == 0:
-                    print(json.dumps({'feed_build':'progress','page':page,'products':product_count,'variants':variant_count}, ensure_ascii=False), flush=True)
+                    print(json.dumps({
+                        'feed_build':'progress',
+                        'page':page,
+                        'pazaruvaj_products':pazar_products,
+                        'pazaruvaj_variants':pazar_variants,
+                        'google_items':google_items,
+                        'ai_items':ai_items,
+                    }, ensure_ascii=False), flush=True)
 
                 pi = conn.get('pageInfo') or {}
                 if not pi.get('hasNextPage'):
@@ -271,32 +413,63 @@ def build_feed_once():
                 if not cursor or page >= 1000:
                     break
 
-            f.write('</products>\n')
-            f.flush()
-            os.fsync(f.fileno())
+            pf.write('</products>\n')
+            gf.write('</channel>\n</rss>\n')
+            af.write('\n]}\n')
 
-        size = os.path.getsize(TMP_PATH)
-        if product_count <= 0 or variant_count <= 0 or size < 1000:
-            raise RuntimeError(f'Feed integrity check failed: products={product_count}, variants={variant_count}, bytes={size}')
+            for f in (pf, gf, af):
+                f.flush()
+                os.fsync(f.fileno())
 
-        os.replace(TMP_PATH, FEED_PATH)
+        pazar_size = os.path.getsize(PAZARUVAJ_TMP)
+        google_size = os.path.getsize(GOOGLE_TMP)
+        ai_size = os.path.getsize(AI_TMP)
+
+        if pazar_products <= 0 or pazar_variants <= 0 or pazar_size < 1000:
+            raise RuntimeError(f'Pazaruvaj feed integrity failed: products={pazar_products}, variants={pazar_variants}, bytes={pazar_size}')
+        if google_items <= 0 or google_size < 1000:
+            raise RuntimeError(f'Google feed integrity failed: items={google_items}, bytes={google_size}')
+        if ai_items <= 0 or ai_size < 1000:
+            raise RuntimeError(f'AI feed integrity failed: items={ai_items}, bytes={ai_size}')
+
+        os.replace(PAZARUVAJ_TMP, PAZARUVAJ_PATH)
+        os.replace(GOOGLE_TMP, GOOGLE_PATH)
+        os.replace(AI_TMP, AI_PATH)
+
         with lock:
             state['last_ok'] = time.time()
-            state['products'] = product_count
-            state['variants'] = variant_count
-            state['bytes'] = size
+            state['products'] = pazar_products
+            state['variants'] = pazar_variants
+            state['bytes'] = pazar_size
             state['pages'] = page
+            state['google_items'] = google_items
+            state['google_bytes'] = google_size
+            state['ai_items'] = ai_items
+            state['ai_bytes'] = ai_size
             state['last_error'] = None
 
-        print(json.dumps({'feed_build':'completed','products':product_count,'variants':variant_count,'bytes':size,'source':'Shopify Admin GraphQL','pages':page,'auth_mode':(auth or {}).get('mode')}, ensure_ascii=False), flush=True)
+        print(json.dumps({
+            'feed_build':'completed',
+            'pazaruvaj_products':pazar_products,
+            'pazaruvaj_variants':pazar_variants,
+            'pazaruvaj_bytes':pazar_size,
+            'google_items':google_items,
+            'google_bytes':google_size,
+            'ai_items':ai_items,
+            'ai_bytes':ai_size,
+            'source':'Shopify Admin GraphQL',
+            'pages':page,
+            'auth_mode':(auth or {}).get('mode'),
+        }, ensure_ascii=False), flush=True)
         return True
 
     except Exception as e:
-        try:
-            if os.path.exists(TMP_PATH):
-                os.remove(TMP_PATH)
-        except Exception:
-            pass
+        for path in (PAZARUVAJ_TMP, GOOGLE_TMP, AI_TMP):
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
         with lock:
             state['last_error'] = f'{type(e).__name__}: {e}'
         print(json.dumps({'feed_build':'failed','error':state['last_error']}, ensure_ascii=False), flush=True)
@@ -308,10 +481,10 @@ def build_feed_once():
 
 def orchestrator_loop():
     while True:
-        feed_ok = build_feed_once()
+        feed_ok = build_feeds_once()
         if ENABLE_CATALOG_SYNC:
             try:
-                print(json.dumps({'catalog_sync':'starting_after_feed','feed_ok':feed_ok}, ensure_ascii=False), flush=True)
+                print(json.dumps({'catalog_sync':'starting_after_feeds','feed_ok':feed_ok}, ensure_ascii=False), flush=True)
                 result = run_catalog_sync()
                 print(json.dumps({'catalog_sync':'finished','state':(result or {}).get('state')}, ensure_ascii=False), flush=True)
             except Exception as e:
@@ -320,12 +493,29 @@ def orchestrator_loop():
 
 
 def start_builders():
-    threading.Thread(target=orchestrator_loop, name='bgshopping-feed-and-catalog', daemon=True).start()
+    threading.Thread(target=orchestrator_loop, name='bgshopping-feeds-and-catalog', daemon=True).start()
+
+
+def serve_file(path, content_type, min_size=1000):
+    if not os.path.exists(path) or os.path.getsize(path) <= min_size:
+        return Response('Feed is being generated.\n', status=503, content_type='text/plain; charset=utf-8', headers={'Retry-After':'60','Cache-Control':'no-store'})
+    with open(path, 'rb') as f:
+        payload = f.read()
+    return Response(payload, status=200, content_type=content_type, headers={'Cache-Control':'public, max-age=300','Content-Length':str(len(payload))})
 
 
 @app.get('/')
 def home():
-    return jsonify(service='BGShopping Catalog Sync', feed='/pazaruvaj.xml', feed_status='/feed-status', catalog_status='/catalog-status', supplier_status='/supplier-status', shopify_status='/shopify-sync-status')
+    return jsonify(
+        service='BGShopping Commerce Feeds',
+        pazaruvaj='/pazaruvaj.xml',
+        google_shopping='/google-shopping.xml',
+        ai_products='/ai-products.json',
+        feed_status='/feed-status',
+        catalog_status='/catalog-status',
+        supplier_status='/supplier-status',
+        shopify_status='/shopify-sync-status',
+    )
 
 
 @app.get('/health')
@@ -337,9 +527,9 @@ def health():
 def feed_status():
     with lock:
         data = dict(state)
-    exists = os.path.exists(FEED_PATH)
-    data['ready'] = exists and os.path.getsize(FEED_PATH) > 1000
-    data['file_bytes'] = os.path.getsize(FEED_PATH) if exists else 0
+    data['pazaruvaj_ready'] = os.path.exists(PAZARUVAJ_PATH) and os.path.getsize(PAZARUVAJ_PATH) > 1000
+    data['google_ready'] = os.path.exists(GOOGLE_PATH) and os.path.getsize(GOOGLE_PATH) > 1000
+    data['ai_ready'] = os.path.exists(AI_PATH) and os.path.getsize(AI_PATH) > 1000
     if data['last_ok']:
         data['last_ok_iso'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(data['last_ok']))
     return jsonify(data)
@@ -362,19 +552,17 @@ def shopify_sync_status():
 
 @app.get('/pazaruvaj.xml')
 def pazaruvaj():
-    if not os.path.exists(FEED_PATH) or os.path.getsize(FEED_PATH) <= 1000:
-        return Response('<?xml version="1.0" encoding="UTF-8"?>\n<products></products>\n', status=503, content_type='application/xml; charset=utf-8', headers={'Retry-After':'60','Cache-Control':'no-store'})
+    return serve_file(PAZARUVAJ_PATH, 'application/xml; charset=utf-8')
 
-    try:
-        with open(FEED_PATH, 'rb') as f:
-            payload = f.read()
-    except Exception as e:
-        return Response(f'<?xml version="1.0" encoding="UTF-8"?>\n<error>{esc(type(e).__name__)}</error>\n', status=503, content_type='application/xml; charset=utf-8', headers={'Retry-After':'60','Cache-Control':'no-store'})
 
-    if len(payload) <= 1000 or b'<product>' not in payload:
-        return Response('<?xml version="1.0" encoding="UTF-8"?>\n<products></products>\n', status=503, content_type='application/xml; charset=utf-8', headers={'Retry-After':'60','Cache-Control':'no-store'})
+@app.get('/google-shopping.xml')
+def google_shopping():
+    return serve_file(GOOGLE_PATH, 'application/xml; charset=utf-8')
 
-    return Response(payload, status=200, content_type='application/xml; charset=utf-8', headers={'Cache-Control':'public, max-age=300','Content-Length':str(len(payload)),'X-BGShopping-Feed-Products':str(state.get('products',0)),'X-BGShopping-Feed-Variants':str(state.get('variants',0))})
+
+@app.get('/ai-products.json')
+def ai_products():
+    return serve_file(AI_PATH, 'application/ld+json; charset=utf-8')
 
 
 start_builders()
