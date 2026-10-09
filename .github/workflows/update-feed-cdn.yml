@@ -1,6 +1,10 @@
 name: Update Feed CDN
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/update-feed-cdn.yml'
   schedule:
     - cron: '17 */4 * * *'
   workflow_dispatch:
