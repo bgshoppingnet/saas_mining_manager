@@ -4,12 +4,13 @@ from urllib.parse import quote
 from run_catalog_sync_v3 import run as run_catalog_sync
 
 app = Flask(__name__)
-SHOP_URL = os.getenv('SHOP_URL', 'https://bgshopping.net').rstrip('/')
 PUBLIC_SHOP_URL = os.getenv('PUBLIC_SHOP_URL', 'https://bgshopping.net').rstrip('/')
-MYSHOPIFY_URL = os.getenv('MYSHOPIFY_URL', 'https://kynvva-gx.myshopify.com').rstrip('/')
 VAT_RATE = float(os.getenv('VAT_RATE', '0.20'))
 REFRESH_SECONDS = int(os.getenv('REFRESH_SECONDS', '14400'))
 ENABLE_CATALOG_SYNC = os.getenv('ENABLE_CATALOG_SYNC', 'true').lower() in ('1', 'true', 'yes', 'on')
+SHOPIFY_SHOP_DOMAIN = os.getenv('SHOPIFY_SHOP_DOMAIN', '').strip()
+SHOPIFY_ADMIN_ACCESS_TOKEN = os.getenv('SHOPIFY_ADMIN_ACCESS_TOKEN', '').strip()
+SHOPIFY_API_VERSION = os.getenv('SHOPIFY_API_VERSION', '2026-10').strip()
 FEED_PATH = '/tmp/pazaruvaj.xml'
 TMP_PATH = '/tmp/pazaruvaj.xml.tmp'
 CATALOG_STATUS_PATH = os.getenv('CATALOG_SYNC_STATUS_PATH', '/tmp/catalog-sync-status.json')
@@ -17,6 +18,34 @@ SUPPLIER_STATUS_PATH = os.getenv('SUPPLIER_STATUS_PATH', '/tmp/supplier-status.j
 SHOPIFY_STATUS_PATH = os.getenv('SHOPIFY_SYNC_STATUS_PATH', '/tmp/shopify-sync-status.json')
 state = {'building': False, 'last_ok': None, 'last_error': None, 'products': 0, 'variants': 0, 'bytes': 0}
 lock = threading.Lock()
+
+PRODUCTS_QUERY = '''
+query FeedProducts($cursor: String) {
+  products(first: 100, after: $cursor, query: "status:active", sortKey: ID) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      id
+      title
+      handle
+      vendor
+      productType
+      descriptionHtml
+      featuredImage { url }
+      images(first: 3) { nodes { url } }
+      variants(first: 100) {
+        nodes {
+          id
+          title
+          sku
+          barcode
+          price
+          availableForSale
+        }
+      }
+    }
+  }
+}
+'''
 
 
 def esc(v):
@@ -26,6 +55,10 @@ def esc(v):
 def strip_html(s):
     s = re.sub(r'<[^>]+>', ' ', s or '')
     return ' '.join(html.unescape(s).split())
+
+
+def numeric_gid(gid):
+    return str(gid or '').rsplit('/', 1)[-1]
 
 
 def read_json_status(path):
@@ -51,51 +84,86 @@ def safe_sync_config():
         'refresh_seconds': REFRESH_SECONDS,
         'supplier_feed_count': feed_count,
         'shopify_write_enabled': os.getenv('SHOPIFY_WRITE_ENABLED', 'false').lower() in ('1','true','yes','on'),
-        'shopify_domain_configured': bool(os.getenv('SHOPIFY_SHOP_DOMAIN', '').strip()),
-        'shopify_token_configured': bool(os.getenv('SHOPIFY_ADMIN_ACCESS_TOKEN', '').strip()),
+        'shopify_domain_configured': bool(SHOPIFY_SHOP_DOMAIN),
+        'shopify_token_configured': bool(SHOPIFY_ADMIN_ACCESS_TOKEN),
         'shopify_location_configured': bool(os.getenv('SHOPIFY_LOCATION_ID', '').strip()),
         'fix_handles': os.getenv('SHOPIFY_FIX_HANDLES', 'false').lower() in ('1','true','yes','on'),
         'add_images': os.getenv('SHOPIFY_ADD_IMAGES', 'true').lower() in ('1','true','yes','on'),
     }
 
 
-def product_xml(p):
-    handle = p.get('handle', '')
-    vendor = p.get('vendor', '')
-    ptype = p.get('product_type', '')
-    desc = strip_html(p.get('body_html', ''))
-    images = p.get('images') or []
-    chunks = []
-    variants = 0
+def admin_gql(session, query, variables=None):
+    if not SHOPIFY_SHOP_DOMAIN or not SHOPIFY_ADMIN_ACCESS_TOKEN:
+        raise RuntimeError('Shopify Admin API is not configured')
+    url = f'https://{SHOPIFY_SHOP_DOMAIN}/admin/api/{SHOPIFY_API_VERSION}/graphql.json'
+    r = session.post(
+        url,
+        headers={
+            'X-Shopify-Access-Token': SHOPIFY_ADMIN_ACCESS_TOKEN,
+            'Content-Type': 'application/json',
+            'User-Agent': 'BGShopping-Pazaruvaj-Feed/7.0',
+        },
+        json={'query': query, 'variables': variables or {}},
+        timeout=(20, 120),
+    )
+    r.raise_for_status()
+    data = r.json()
+    if data.get('errors'):
+        raise RuntimeError('Shopify GraphQL: ' + json.dumps(data['errors'], ensure_ascii=False))
+    return data.get('data') or {}
 
+
+def product_xml(p):
+    handle = (p.get('handle') or '').strip()
     if not handle:
         return '', 0
 
-    for v in p.get('variants') or []:
-        if not v.get('available', True):
+    vendor = (p.get('vendor') or '').strip()
+    ptype = (p.get('productType') or '').strip()
+    desc = strip_html(p.get('descriptionHtml') or '')
+    image_nodes = ((p.get('images') or {}).get('nodes') or [])[:3]
+    image_urls = []
+    for img in image_nodes:
+        url = (img or {}).get('url') or ''
+        if url and url not in image_urls:
+            image_urls.append(url)
+    if not image_urls:
+        featured = ((p.get('featuredImage') or {}).get('url') or '').strip()
+        if featured:
+            image_urls.append(featured)
+
+    chunks = []
+    variants = 0
+    for v in ((p.get('variants') or {}).get('nodes') or []):
+        if not v.get('availableForSale', False):
             continue
 
-        price = v.get('price') or '0'
         try:
-            gross = float(price)
+            gross = float(v.get('price') or 0)
             if gross <= 0:
                 continue
             net = gross / (1 + VAT_RATE)
         except Exception:
             continue
 
-        variants += 1
-        vid = v.get('id', '')
+        vid = numeric_gid(v.get('id'))
         sku = (v.get('sku') or '').strip()
         barcode = (v.get('barcode') or '').strip()
-        identifier = sku or barcode or str(vid)
+        identifier = sku or barcode or vid
+        if not identifier:
+            continue
 
-        title = p.get('title', '')
-        vtitle = v.get('title', '')
+        title = (p.get('title') or '').strip()
+        vtitle = (v.get('title') or '').strip()
         if vtitle and vtitle != 'Default Title':
             title = f'{title} - {vtitle}'
+        if not title:
+            continue
 
-        link = f'{PUBLIC_SHOP_URL}/products/{quote(handle)}?variant={vid}'
+        link = f'{PUBLIC_SHOP_URL}/products/{quote(handle)}'
+        if vid:
+            link += f'?variant={vid}'
+
         parts = [
             '<product>',
             f'<identifier>{esc(identifier)}</identifier>',
@@ -112,38 +180,14 @@ def product_xml(p):
             parts.append(f'<ean>{esc(barcode)}</ean>')
         if desc:
             parts.append(f'<description>{esc(desc)}</description>')
-        for i, img in enumerate(images[:3], start=1):
-            src = (img.get('src') or '').strip()
-            if src:
-                parts.append(f'<image{i}>{esc(src)}</image{i}>')
+        for i, src in enumerate(image_urls, start=1):
+            parts.append(f'<image{i}>{esc(src)}</image{i}>')
         parts.append('<delivery_time>1</delivery_time>')
         parts.append('</product>')
         chunks.append('\n'.join(parts) + '\n')
+        variants += 1
+
     return ''.join(chunks), variants
-
-
-def source_candidates():
-    bases = []
-    for base in (SHOP_URL, PUBLIC_SHOP_URL, MYSHOPIFY_URL):
-        if base and base not in bases:
-            bases.append(base)
-    paths = ('/products.json', '/collections/all/products.json')
-    return [(base, path) for base in bases for path in paths]
-
-
-def choose_source(session):
-    probes = []
-    for base, path in source_candidates():
-        try:
-            r = session.get(f'{base}{path}', params={'limit': 250}, timeout=(10, 45), allow_redirects=True)
-            data = r.json()
-            products = data.get('products', []) if isinstance(data, dict) else []
-            probes.append({'base': base, 'path': path, 'status': r.status_code, 'count': len(products)})
-            if products:
-                return base, path, products, probes
-        except Exception as e:
-            probes.append({'base': base, 'path': path, 'status': 0, 'count': 0, 'error': f'{type(e).__name__}: {e}'})
-    return None, None, [], probes
 
 
 def build_feed_once():
@@ -155,57 +199,38 @@ def build_feed_once():
 
     try:
         session = requests.Session()
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (compatible; BGShopping-Pazaruvaj-Feed/6.0; +https://bgshopping.net)',
-            'Accept': 'application/json,text/plain,*/*',
-        })
-        base, path, batch, probes = choose_source(session)
-        if not base:
-            raise RuntimeError(f'No Shopify JSON product source returned products: {probes}')
-
-        seen = set()
-        since_id = 0
         product_count = 0
         variant_count = 0
-        request_count = 0
+        cursor = None
+        page = 0
 
         with open(TMP_PATH, 'w', encoding='utf-8', newline='\n') as f:
             f.write('<?xml version="1.0" encoding="UTF-8"?>\n<products>\n')
-            while batch and request_count < 500:
-                max_id = since_id
-                for p in batch:
-                    pid = p.get('id')
-                    if pid in seen:
-                        continue
-                    if pid is not None:
-                        seen.add(pid)
-                        try:
-                            max_id = max(max_id, int(pid))
-                        except Exception:
-                            pass
-
+            while True:
+                page += 1
+                data = admin_gql(session, PRODUCTS_QUERY, {'cursor': cursor})
+                conn = data.get('products') or {}
+                nodes = conn.get('nodes') or []
+                for p in nodes:
                     xml, variants = product_xml(p)
                     if xml:
                         f.write(xml)
-                        variant_count += variants
                         product_count += 1
+                        variant_count += variants
 
-                if len(batch) < 250 or max_id <= since_id:
+                pi = conn.get('pageInfo') or {}
+                if not pi.get('hasNextPage'):
                     break
-
-                since_id = max_id
-                request_count += 1
-                r = session.get(f'{base}{path}', params={'limit': 250, 'since_id': since_id}, timeout=(10, 60), allow_redirects=True)
-                r.raise_for_status()
-                data = r.json()
-                batch = data.get('products', []) if isinstance(data, dict) else []
+                cursor = pi.get('endCursor')
+                if not cursor or page >= 1000:
+                    break
 
             f.write('</products>\n')
             f.flush()
             os.fsync(f.fileno())
 
         size = os.path.getsize(TMP_PATH)
-        if product_count <= 0 or variant_count <= 0 or size < 100:
+        if product_count <= 0 or variant_count <= 0 or size < 1000:
             raise RuntimeError(f'Feed integrity check failed: products={product_count}, variants={variant_count}, bytes={size}')
 
         os.replace(TMP_PATH, FEED_PATH)
@@ -221,7 +246,8 @@ def build_feed_once():
             'products': product_count,
             'variants': variant_count,
             'bytes': size,
-            'source': f'{base}{path}',
+            'source': 'Shopify Admin GraphQL',
+            'pages': page,
         }, ensure_ascii=False), flush=True)
         return True
 
@@ -279,8 +305,9 @@ def health():
 def feed_status():
     with lock:
         data = dict(state)
-    data['ready'] = os.path.exists(FEED_PATH) and os.path.getsize(FEED_PATH) > 100 if os.path.exists(FEED_PATH) else False
-    data['file_bytes'] = os.path.getsize(FEED_PATH) if os.path.exists(FEED_PATH) else 0
+    exists = os.path.exists(FEED_PATH)
+    data['ready'] = exists and os.path.getsize(FEED_PATH) > 1000
+    data['file_bytes'] = os.path.getsize(FEED_PATH) if exists else 0
     if data['last_ok']:
         data['last_ok_iso'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(data['last_ok']))
     return jsonify(data)
@@ -303,7 +330,7 @@ def shopify_sync_status():
 
 @app.get('/pazaruvaj.xml')
 def pazaruvaj():
-    if not os.path.exists(FEED_PATH) or os.path.getsize(FEED_PATH) <= 100:
+    if not os.path.exists(FEED_PATH) or os.path.getsize(FEED_PATH) <= 1000:
         return Response(
             '<?xml version="1.0" encoding="UTF-8"?>\n<products></products>\n',
             status=503,
@@ -322,7 +349,7 @@ def pazaruvaj():
             headers={'Retry-After': '60', 'Cache-Control': 'no-store'},
         )
 
-    if len(payload) <= 100 or b'<product>' not in payload:
+    if len(payload) <= 1000 or b'<product>' not in payload:
         return Response(
             '<?xml version="1.0" encoding="UTF-8"?>\n<products></products>\n',
             status=503,
