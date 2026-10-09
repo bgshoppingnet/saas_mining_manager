@@ -16,6 +16,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: bgshopping-feed-brand-model
+  cancel-in-progress: false
+
 jobs:
   enrich:
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
@@ -26,6 +30,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: feed-cdn
+          fetch-depth: 0
 
       - name: Add canonical brand and model metadata
         shell: bash
@@ -178,7 +183,7 @@ jobs:
               raise SystemExit('AI feed has no products')
           PY
 
-      - name: Publish enrichment
+      - name: Publish enrichment safely
         shell: bash
         run: |
           set -euo pipefail
@@ -190,4 +195,6 @@ jobs:
             exit 0
           fi
           git commit -m 'Enrich feeds with canonical brand and model metadata'
+          git fetch origin feed-cdn
+          git rebase origin/feed-cdn
           git push origin HEAD:feed-cdn
