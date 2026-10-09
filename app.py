@@ -1,7 +1,7 @@
 from flask import Flask, Response, jsonify, send_file
 import os, html, requests, re, threading, time, json
 from urllib.parse import quote
-from run_catalog_sync_v2 import run as run_catalog_sync
+from run_catalog_sync_v3 import run as run_catalog_sync
 
 app = Flask(__name__)
 SHOP_URL = os.getenv('SHOP_URL', 'https://bgshopping.net').rstrip('/')
