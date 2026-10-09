@@ -47,7 +47,7 @@ def run():
         'state':'running','mode':'shopify_bulk','started_at':started,
         'suppliers':None,'shopify_auth':None,
         'lorelli':None,'inventory':None,'duplicates':None,
-        'euromaster':None,'fatal_error':None,
+        'euromaster':None,'promotions':None,'fatal_error':None,
     }
     write_status(result)
     try:
@@ -66,6 +66,8 @@ def run():
         import bulk_inventory_sync
         import bulk_duplicate_cleanup
         import bulk_euromaster_sync
+        import bulk_euromaster_sync_patch
+        import bulk_clear_promotions
 
         bulk_shopify_sync = importlib.reload(bulk_shopify_sync)
         bulk_shopify_sync_patch = importlib.reload(bulk_shopify_sync_patch)
@@ -96,19 +98,34 @@ def run():
             write_status(result)
         duplicate_state = (result['duplicates'] or {}).get('state', '') if result['duplicates'] else ''
 
-        # 4) Euromaster live feed. The importer uses the same Shopify asynchronous
-        # bulk/checkpoint machinery, so an interrupted Render process can resume.
+        # 4) Euromaster. Apply the current Shopify schema compatibility patch
+        # before running. It also clears compare-at pricing on touched variants.
         if all(x not in ('failed','checkpoint_wait') for x in (lorelli_state, inventory_state, duplicate_state)):
             bulk_euromaster_sync = importlib.reload(bulk_euromaster_sync)
-            bulk_euromaster_sync.core.TOKEN = os.environ.get('SHOPIFY_ADMIN_ACCESS_TOKEN', '').strip()
-            bulk_euromaster_sync.core.SHOP = os.environ.get('SHOPIFY_SHOP_DOMAIN', '').strip()
-            bulk_euromaster_sync.invcore.core.TOKEN = os.environ.get('SHOPIFY_ADMIN_ACCESS_TOKEN', '').strip()
-            bulk_euromaster_sync.invcore.core.SHOP = os.environ.get('SHOPIFY_SHOP_DOMAIN', '').strip()
+            bulk_euromaster_sync_patch = importlib.reload(bulk_euromaster_sync_patch)
+            bulk_euromaster_sync_patch.install(bulk_euromaster_sync)
+            token = os.environ.get('SHOPIFY_ADMIN_ACCESS_TOKEN', '').strip()
+            shop = os.environ.get('SHOPIFY_SHOP_DOMAIN', '').strip()
+            bulk_euromaster_sync.core.TOKEN = token
+            bulk_euromaster_sync.core.SHOP = shop
+            bulk_euromaster_sync.invcore.core.TOKEN = token
+            bulk_euromaster_sync.invcore.core.SHOP = shop
             result['euromaster'] = bulk_euromaster_sync.run()
             write_status(result)
         euromaster_state = (result['euromaster'] or {}).get('state', '') if result['euromaster'] else ''
 
-        states=[lorelli_state,inventory_state,duplicate_state,euromaster_state]
+        # 5) Promotions OFF for now. Restore compare-at value as the regular
+        # price and clear compareAtPrice on every active reduced-price variant.
+        # Supplier/product promotions will be reintroduced later with explicit rules.
+        if euromaster_state == 'completed':
+            bulk_clear_promotions = importlib.reload(bulk_clear_promotions)
+            bulk_clear_promotions.core.TOKEN = os.environ.get('SHOPIFY_ADMIN_ACCESS_TOKEN', '').strip()
+            bulk_clear_promotions.core.SHOP = os.environ.get('SHOPIFY_SHOP_DOMAIN', '').strip()
+            result['promotions'] = bulk_clear_promotions.run()
+            write_status(result)
+        promotion_state = (result['promotions'] or {}).get('state', '') if result['promotions'] else ''
+
+        states=[lorelli_state,inventory_state,duplicate_state,euromaster_state,promotion_state]
         if 'failed' in states:
             result['state']='failed'
         elif 'checkpoint_wait' in states:
