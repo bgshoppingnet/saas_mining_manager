@@ -1,0 +1,66 @@
+name: Prepare Lorelli Safe Batches
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/prepare-lorelli-safe-batches.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Build safe 25-item metafield batches
+        shell: bash
+        env:
+          SOURCE_URL: "https://storage.googleapis.com/shopify-tiers-assets-prod-us-east1/bulk-operation-outputs/42ae0d32090f97792ade6d6c433d?GoogleAccessId=assets-us-prod%40shopify-tiers.iam.gserviceaccount.com&Expires=1792187971&Signature=l43KRlEnDLgq5XP4lTm8W4I8IK56QIrhp33%2BjgjbMjxvGTytDmEkKFeN7nUp0JsaHOkf24t55fL%2FRoNOC%2FVhcSz75yqyY4O0nDLvNvEt3z9G5DfV3VUOfOlubBF6jed%2FthWoMADTJQXa3naW5Jk0YXiDf2rZUC5JhRepEoFFwOIlHYvlGBOOsIB84RPAmVNHwp7H4RNBSLYRMOgdkzqIBg3bD9%2Fj4I58crg4aEDXVDUeJt22zG0rcVIEll4duM34G0D1D%2FzAIAiJtkETyVvs6gLTgeSv7zr4aynnHXD5gifb1NJNDmeRWvosBNVUWeIVYHPa82EVeHiH5tEZM%2BaUQA%3D%3D&response-content-disposition=attachment%3B+filename%3D%22staging-bulk-12068374217049.jsonl%22%3B+filename%2A%3DUTF-8%27%27staging-bulk-12068374217049.jsonl&response-content-type=application%2Fjsonl"
+        run: |
+          set -euo pipefail
+          mkdir -p ops
+          curl -fL --retry 5 --retry-delay 2 "$SOURCE_URL" -o /tmp/source.jsonl
+          python - <<'PY'
+          import json
+          ids=[]
+          with open('/tmp/source.jsonl', encoding='utf-8') as f:
+              for line in f:
+                  if not line.strip():
+                      continue
+                  obj=json.loads(line)
+                  gid=str(obj.get('id') or '')
+                  if gid.startswith('gid://shopify/Product/'):
+                      ids.append(gid)
+          ids=list(dict.fromkeys(ids))
+          if not ids:
+              raise SystemExit('No product IDs found')
+          updates=[{
+              'ownerId':gid,
+              'namespace':'custom',
+              'key':'brand',
+              'type':'single_line_text_field',
+              'value':'Lorelli'
+          } for gid in ids]
+          with open('ops/lorelli-brand-batches.jsonl','w',encoding='utf-8',newline='\n') as out:
+              for i in range(0,len(updates),25):
+                  out.write(json.dumps(updates[i:i+25],separators=(',',':'))+'\n')
+          with open('ops/lorelli-brand-batches-meta.json','w',encoding='utf-8') as out:
+              json.dump({'products':len(ids),'batches':(len(ids)+24)//25,'batch_size':25},out,indent=2)
+              out.write('\n')
+          print('products',len(ids),'batches',(len(ids)+24)//25)
+          PY
+      - name: Commit batch plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'BGShopping Automation'
+          git config user.email 'bgshopping.net@gmail.com'
+          git add ops/lorelli-brand-batches.jsonl ops/lorelli-brand-batches-meta.json
+          git commit -m 'Prepare 25-item Lorelli brand batches'
+          git push origin HEAD:main
