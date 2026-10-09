@@ -53,6 +53,8 @@ jobs:
               low = raw.casefold()
               if not raw:
                   return ''
+              if low.startswith('raider pro') or low in {'raiderpro', 'raider pro tools'}:
+                  return 'Raider Pro'
               if low.startswith('raider'):
                   return 'Raider'
               if low in {'kikaboo', 'kikka boo', 'kikka-boo'}:
