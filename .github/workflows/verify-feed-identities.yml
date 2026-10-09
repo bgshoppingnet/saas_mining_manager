@@ -8,93 +8,100 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Checkout enriched feed branch
+      - name: Checkout stable feed branch
         uses: actions/checkout@v4
         with:
           ref: feed-cdn
+          path: feed-cdn
+
+      - name: Checkout main for status output
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main
 
       - name: Verify RDP-HD57 across feeds
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
-          import json, re, html, xml.etree.ElementTree as ET
+          import json, re, html
           from pathlib import Path
 
+          root=Path('feed-cdn/feeds')
           target='RDP-HD57'
-          report={}
+          report={'target':target}
 
-          # Google Shopping
-          text=Path('feeds/google-shopping.xml').read_text(encoding='utf-8')
-          blocks=re.findall(r'<item>(.*?)</item>', text, flags=re.S|re.I)
-          block=next((b for b in blocks if target.casefold() in html.unescape(b).casefold()), None)
-          if not block:
-              raise SystemExit('RDP-HD57 not found in Google Shopping feed')
           def tag(body,name):
               m=re.search(rf'<{re.escape(name)}>(.*?)</{re.escape(name)}>',body,re.S|re.I)
               return html.unescape(m.group(1).strip()) if m else ''
-          report['google']={
-              'title':tag(block,'title'),
-              'brand':tag(block,'g:brand'),
-              'mpn':tag(block,'g:mpn'),
-              'id':tag(block,'g:id'),
-          }
 
-          # Pazaruvaj
-          ptext=Path('feeds/pazaruvaj.xml').read_text(encoding='utf-8')
+          gtext=(root/'google-shopping.xml').read_text(encoding='utf-8')
+          gblocks=re.findall(r'<item>(.*?)</item>',gtext,flags=re.S|re.I)
+          gb=next((b for b in gblocks if target.casefold() in html.unescape(b).casefold()),None)
+          if not gb:
+              raise SystemExit('RDP-HD57 not found in Google Shopping feed')
+          report['google']={'title':tag(gb,'title'),'brand':tag(gb,'g:brand'),'mpn':tag(gb,'g:mpn'),'id':tag(gb,'g:id')}
+
+          ptext=(root/'pazaruvaj.xml').read_text(encoding='utf-8')
           pblocks=re.findall(r'<product>(.*?)</product>',ptext,flags=re.S|re.I)
-          pblock=next((b for b in pblocks if target.casefold() in html.unescape(b).casefold()), None)
-          if not pblock:
+          pb=next((b for b in pblocks if target.casefold() in html.unescape(b).casefold()),None)
+          if not pb:
               raise SystemExit('RDP-HD57 not found in Pazaruvaj feed')
           model=''
-          for attr in re.findall(r'<Attribute>(.*?)</Attribute>',pblock,flags=re.S|re.I):
-              n=tag(attr,'Attribute_Name')
-              if n.casefold() in {'модел','model'}:
-                  model=tag(attr,'Attribute_Value')
-                  break
-          report['pazaruvaj']={
-              'name':tag(pblock,'name'),
-              'manufacturer':tag(pblock,'manufacturer'),
-              'model':model,
-              'id':tag(pblock,'id'),
-          }
+          for attr in re.findall(r'<Attribute>(.*?)</Attribute>',pb,flags=re.S|re.I):
+              if tag(attr,'Attribute_Name').casefold() in {'модел','model'}:
+                  model=tag(attr,'Attribute_Value'); break
+          report['pazaruvaj']={'name':tag(pb,'name'),'manufacturer':tag(pb,'manufacturer'),'model':model,'identifier':tag(pb,'identifier') or tag(pb,'id')}
 
-          # AI JSON
-          data=json.loads(Path('feeds/ai-products.json').read_text(encoding='utf-8'))
+          data=json.loads((root/'ai-products.json').read_text(encoding='utf-8'))
           products=data.get('products',[]) if isinstance(data,dict) else data
           item=next((x for x in products if isinstance(x,dict) and target.casefold() in ' '.join(str(x.get(k,'')) for k in ('name','model','mpn')).casefold()),None)
           if not item:
               raise SystemExit('RDP-HD57 not found in AI product feed')
           brand=item.get('brand')
           if isinstance(brand,dict): brand=brand.get('name','')
-          report['ai']={
-              'name':item.get('name',''),
-              'brand':brand or '',
-              'model':item.get('model',''),
-              'mpn':item.get('mpn',''),
-              'sku':item.get('sku',''),
-          }
+          report['ai']={'name':item.get('name',''),'brand':brand or '','model':item.get('model',''),'mpn':item.get('mpn',''),'sku':item.get('sku',''),'gtin':item.get('gtin','')}
 
           checks={
-              'google_brand_raider': report['google']['brand'].casefold()=='raider',
-              'google_mpn_is_model': report['google']['mpn'].casefold()==target.casefold(),
-              'pazaruvaj_brand_raider': report['pazaruvaj']['manufacturer'].casefold()=='raider',
-              'pazaruvaj_model': report['pazaruvaj']['model'].casefold()==target.casefold(),
-              'ai_brand_raider': str(report['ai']['brand']).casefold()=='raider',
-              'ai_model': str(report['ai']['model']).casefold()==target.casefold(),
-              'ai_mpn': str(report['ai']['mpn']).casefold()==target.casefold(),
-              'sku_not_used_as_model': str(report['ai']['sku']).casefold()!=target.casefold(),
+              'google_brand_raider':report['google']['brand'].casefold()=='raider',
+              'google_mpn_is_model':report['google']['mpn'].casefold()==target.casefold(),
+              'pazaruvaj_brand_raider':report['pazaruvaj']['manufacturer'].casefold()=='raider',
+              'pazaruvaj_model':report['pazaruvaj']['model'].casefold()==target.casefold(),
+              'ai_brand_raider':str(report['ai']['brand']).casefold()=='raider',
+              'ai_model':str(report['ai']['model']).casefold()==target.casefold(),
+              'ai_mpn':str(report['ai']['mpn']).casefold()==target.casefold(),
+              'sku_not_used_as_model':str(report['ai']['sku']).casefold()!=target.casefold(),
           }
           report['checks']=checks
-          print('IDENTITY_REPORT='+json.dumps(report,ensure_ascii=False,sort_keys=True))
-          failed=[k for k,v in checks.items() if not v]
-          if failed:
-              raise SystemExit('Identity verification failed: '+', '.join(failed))
+          report['ok']=all(checks.values())
+          out=Path('main/ops/feed-identity-status.json')
+          out.parent.mkdir(parents=True,exist_ok=True)
+          out.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          print(json.dumps(report,ensure_ascii=False,indent=2))
+          if not report['ok']:
+              raise SystemExit('Identity verification failed: '+', '.join(k for k,v in checks.items() if not v))
           PY
+
+      - name: Commit verification status
+        if: success()
+        shell: bash
+        working-directory: main
+        run: |
+          set -euo pipefail
+          git config user.name 'BGShopping Verification Bot'
+          git config user.email 'bgshopping.net@gmail.com'
+          git add ops/feed-identity-status.json
+          if git diff --cached --quiet; then
+            echo 'Verification status unchanged.'
+            exit 0
+          fi
+          git commit -m 'Record verified feed identity status'
+          git push origin HEAD:main
