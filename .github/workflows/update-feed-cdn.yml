@@ -1,0 +1,78 @@
+name: Update Feed CDN
+
+on:
+  schedule:
+    - cron: '17 */4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  refresh-feeds:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout feed-cdn branch
+        uses: actions/checkout@v4
+        with:
+          ref: feed-cdn
+
+      - name: Fetch latest feeds from generator
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p feeds tmp-feeds
+
+          fetch_with_retry() {
+            url="$1"
+            out="$2"
+            for i in $(seq 1 90); do
+              code=$(curl -L -sS -o "$out.tmp" -w '%{http_code}' --max-time 120 "$url" || true)
+              if [ "$code" = "200" ] && [ -s "$out.tmp" ]; then
+                mv "$out.tmp" "$out"
+                return 0
+              fi
+              rm -f "$out.tmp"
+              echo "Attempt $i for $url returned HTTP $code; retrying in 10s"
+              sleep 10
+            done
+            echo "Failed to fetch $url after retries" >&2
+            return 1
+          }
+
+          fetch_with_retry "https://bgshopping-pazaruvaj-feed.onrender.com/pazaruvaj.xml" "tmp-feeds/pazaruvaj.xml"
+          fetch_with_retry "https://bgshopping-pazaruvaj-feed.onrender.com/google-shopping.xml" "tmp-feeds/google-shopping.xml"
+          fetch_with_retry "https://bgshopping-pazaruvaj-feed.onrender.com/ai-products.json" "tmp-feeds/ai-products.json"
+
+      - name: Validate downloaded feeds
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -qi '<products\|<rss\|<channel' tmp-feeds/pazaruvaj.xml
+          grep -qi '<rss\|<channel\|<item' tmp-feeds/google-shopping.xml
+          python - <<'PY'
+          import json
+          with open('tmp-feeds/ai-products.json', 'r', encoding='utf-8') as f:
+              data=json.load(f)
+          if not isinstance(data, (list, dict)):
+              raise SystemExit('Unexpected AI feed JSON shape')
+          PY
+
+      - name: Publish atomically to branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          mv tmp-feeds/pazaruvaj.xml feeds/pazaruvaj.xml
+          mv tmp-feeds/google-shopping.xml feeds/google-shopping.xml
+          mv tmp-feeds/ai-products.json feeds/ai-products.json
+          date -u +'%Y-%m-%dT%H:%M:%SZ' > feeds/last-updated.txt
+          git config user.name 'BGShopping Feed Bot'
+          git config user.email 'bgshopping.net@gmail.com'
+          git add feeds
+          if git diff --cached --quiet; then
+            echo 'No feed changes to publish.'
+            exit 0
+          fi
+          git commit -m 'Refresh stable product feeds'
+          git push origin HEAD:feed-cdn
