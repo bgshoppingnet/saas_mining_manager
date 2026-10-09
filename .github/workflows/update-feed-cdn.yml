@@ -1,4 +1,4 @@
-# Manual refresh trigger 2026-10-09: brand/model enrichment pipeline v2
+# Manual refresh trigger 2026-10-09: brand/model enrichment pipeline v3
 name: Update Feed CDN
 
 on:
