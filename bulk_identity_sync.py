@@ -11,7 +11,7 @@ import bulk_search_discovery_sync as searchsync
 import bulk_bgelectronics_sync as base
 
 MAX_WAIT = int(os.getenv('SHOPIFY_BULK_MAX_WAIT_SECONDS', '680') or '680')
-VERSION = 'V2'
+VERSION = 'V3'
 
 
 def norm(value):
@@ -81,13 +81,11 @@ def plausible_model(value):
 
 
 def infer_model(item):
-    # Prefer explicit supplier fields when they exist.
     for key in ('model', 'mpn', 'manufacturer_part_number', 'manufacturer_code', 'product_code', 'model_code'):
         value = norm(item.get(key))
         if value and plausible_model(value):
             return value[:48]
 
-    # Manufacturer-style model codes in the supplier title are safer than SKU.
     title = norm(item.get('name'))
     for token in re.findall(r'\b[A-Za-zА-Яа-я0-9]+(?:[-_.+/][A-Za-zА-Яа-я0-9]+)+\b', title):
         if plausible_model(token):
@@ -96,12 +94,165 @@ def infer_model(item):
         if plausible_model(token):
             return token[:48]
 
-    # External IDs are accepted only when they look like a manufacturer model.
     external_id = norm(item.get('external_id'))
     if external_id and plausible_model(external_id) and re.search(r'[-_.+/]', external_id):
         return external_id[:48]
-
     return ''
+
+
+FIELD_UNITS = {
+    'weight_g': 'g', 'weight_kg': 'kg', 'net_weight_g': 'g', 'net_weight_kg': 'kg',
+    'gross_weight_g': 'g', 'gross_weight_kg': 'kg',
+    'length_mm': 'mm', 'length_cm': 'cm', 'length_m': 'm',
+    'width_mm': 'mm', 'width_cm': 'cm', 'width_m': 'm',
+    'height_mm': 'mm', 'height_cm': 'cm', 'height_m': 'm',
+    'depth_mm': 'mm', 'depth_cm': 'cm', 'depth_m': 'm',
+    'diameter_mm': 'mm', 'diameter_cm': 'cm',
+    'volume_ml': 'ml', 'volume_l': 'l', 'capacity_ml': 'ml', 'capacity_l': 'l',
+    'voltage_v': 'V', 'power_w': 'W', 'power_kw': 'kW',
+    'battery_capacity_ah': 'Ah', 'battery_capacity_mah': 'mAh',
+    'torque_nm': 'Nm', 'pressure_bar': 'bar', 'frequency_hz': 'Hz', 'speed_rpm': 'rpm',
+}
+
+MEASURE_ALIASES = {
+    'weight': ('weight', 'net_weight', 'gross_weight', 'тегло', 'нето тегло', 'бруто тегло'),
+    'length': ('length', 'дължина'),
+    'width': ('width', 'ширина'),
+    'height': ('height', 'височина'),
+    'depth': ('depth', 'дълбочина'),
+    'diameter': ('diameter', 'диаметър'),
+    'volume': ('volume', 'обем'),
+    'capacity': ('capacity', 'вместимост'),
+    'voltage': ('voltage', 'напрежение'),
+    'power': ('power', 'мощност'),
+    'battery_capacity': ('battery capacity', 'battery_capacity', 'капацитет на батерията'),
+    'torque': ('torque', 'въртящ момент'),
+    'pressure': ('pressure', 'налягане'),
+    'frequency': ('frequency', 'честота'),
+    'speed': ('rpm', 'speed', 'обороти'),
+}
+
+UNIT_RE = re.compile(r'(?<![\w])\d+(?:[.,]\d+)?\s?(?:mm|cm|kg|g|ml|l|m|kW|W|V|Ah|mAh|Nm|bar|MPa|rpm|Hz)(?![\w])', re.I)
+
+
+def scalar_text(value):
+    if value is None:
+        return ''
+    if isinstance(value, (str, int, float)):
+        return norm(value)
+    return ''
+
+
+def add_measure(out, key, value, unit=''):
+    raw = scalar_text(value)
+    if not raw:
+        return
+    if unit and re.fullmatch(r'[-+]?\d+(?:[.,]\d+)?', raw):
+        raw = f'{raw} {unit}'
+    if len(raw) > 80:
+        return
+    out[key] = raw
+
+
+def extract_measurements(item):
+    out = {}
+    for key, unit in FIELD_UNITS.items():
+        if key in item:
+            base_key = re.sub(r'_(?:kg|g|mm|cm|m|ml|l|v|w|kw|ah|mah|nm|bar|hz|rpm)$', '', key, flags=re.I)
+            add_measure(out, base_key, item.get(key), unit)
+
+    for canonical, aliases in MEASURE_ALIASES.items():
+        if canonical in out:
+            continue
+        for alias in aliases:
+            if alias in item:
+                add_measure(out, canonical, item.get(alias))
+                if canonical in out:
+                    break
+
+    attrs = item.get('attributes') or item.get('specifications') or item.get('specs')
+    pairs = []
+    if isinstance(attrs, dict):
+        pairs = list(attrs.items())
+    elif isinstance(attrs, list):
+        for x in attrs:
+            if isinstance(x, dict):
+                k = x.get('name') or x.get('key') or x.get('label')
+                v = x.get('value') or x.get('text')
+                if k is not None and v is not None:
+                    pairs.append((k, v))
+
+    for key, value in pairs:
+        kl = norm(key).casefold()
+        for canonical, aliases in MEASURE_ALIASES.items():
+            if canonical in out:
+                continue
+            if any(a.casefold() in kl for a in aliases):
+                add_measure(out, canonical, value)
+
+    mentions = []
+    for field in ('name', 'description', 'short_description'):
+        text = scalar_text(item.get(field))
+        if not text:
+            continue
+        for match in UNIT_RE.findall(text):
+            val = norm(match)
+            if val and val.casefold() not in {m.casefold() for m in mentions}:
+                mentions.append(val)
+            if len(mentions) >= 24:
+                break
+        if len(mentions) >= 24:
+            break
+    if mentions:
+        out['unit_mentions'] = mentions
+    return out
+
+
+def find_named_value(item, direct_keys, labels):
+    for key in direct_keys:
+        val = item.get(key)
+        if isinstance(val, list):
+            text = ', '.join(norm(x) for x in val if norm(x))
+        else:
+            text = scalar_text(val)
+        if text:
+            return text[:5000]
+
+    attrs = item.get('attributes') or item.get('specifications') or item.get('specs')
+    pairs = []
+    if isinstance(attrs, dict):
+        pairs = list(attrs.items())
+    elif isinstance(attrs, list):
+        for x in attrs:
+            if isinstance(x, dict):
+                k = x.get('name') or x.get('key') or x.get('label')
+                v = x.get('value') or x.get('text')
+                if k is not None and v is not None:
+                    pairs.append((k, v))
+    for key, value in pairs:
+        kl = norm(key).casefold()
+        if any(label in kl for label in labels):
+            text = scalar_text(value)
+            if text:
+                return text[:5000]
+    return ''
+
+
+def infer_ingredients(item):
+    return find_named_value(
+        item,
+        ('ingredients', 'ingredients_text', 'inci', 'sastavki', 'ingredient_list'),
+        ('съставки', 'ingredients', 'ingredient list', 'inci')
+    )
+
+
+def infer_material(item):
+    value = find_named_value(
+        item,
+        ('material', 'materials', 'product_material'),
+        ('материал', 'material')
+    )
+    return value[:255]
 
 
 def operation(phase, digest):
@@ -111,16 +262,17 @@ def operation(phase, digest):
 def rows_digest(rows):
     h = hashlib.sha256()
     h.update(VERSION.encode())
+    keys = (
+        'supplier','sku','ean','external_id','brand','name','model','mpn','description',
+        'weight','weight_g','weight_kg','length','width','height','depth','diameter',
+        'volume','capacity','voltage','power','battery_capacity','torque','pressure',
+        'frequency','speed','ingredients','ingredients_text','inci','material','materials'
+    )
     for item in sorted(rows, key=lambda x: (
         base.low(x.get('supplier')), base.low(x.get('sku')),
         base.low(x.get('ean')), base.low(x.get('external_id'))
     )):
-        h.update('|'.join([
-            base.low(item.get('supplier')), base.low(item.get('sku')),
-            base.low(item.get('ean')), base.low(item.get('external_id')),
-            base.low(item.get('brand')), base.low(item.get('name')),
-            base.low(item.get('model')), base.low(item.get('mpn')),
-        ]).encode())
+        h.update('|'.join(base.low(item.get(k)) for k in keys).encode())
     return h.hexdigest()[:14].upper()
 
 
@@ -134,8 +286,10 @@ def run():
     status = {
         'state': 'running', 'supplier': 'ALL', 'phase': 'start', 'total': 0,
         'matched': 0, 'brand_products': 0, 'model_products': 0,
-        'ambiguous_brand': 0, 'ambiguous_model': 0, 'conflicts': 0,
-        'unmatched': 0, 'failed': 0, 'errors': [], 'started_at': started,
+        'measurement_products': 0, 'ingredient_products': 0, 'material_products': 0,
+        'ambiguous_brand': 0, 'ambiguous_model': 0, 'ambiguous_measurements': 0,
+        'ambiguous_ingredients': 0, 'ambiguous_material': 0,
+        'conflicts': 0, 'unmatched': 0, 'failed': 0, 'errors': [], 'started_at': started,
     }
     base.core.write_status(status)
 
@@ -159,7 +313,10 @@ def run():
                 return status
 
             idx = base.build_indexes(products)
-            identities = defaultdict(lambda: {'brands': set(), 'models': set()})
+            identities = defaultdict(lambda: {
+                'brands': set(), 'models': set(), 'measurements': set(),
+                'ingredients': set(), 'materials': set()
+            })
             conflicts = unmatched = matched = 0
 
             for item in rows:
@@ -171,49 +328,50 @@ def run():
                     unmatched += 1
                     continue
                 matched += 1
+                bucket = identities[product['id']]
                 brand = canonical_brand(item.get('brand') or item.get('manufacturer'))
                 model = infer_model(item)
+                measurements = extract_measurements(item)
+                ingredients = infer_ingredients(item)
+                material = infer_material(item)
                 if brand:
-                    identities[product['id']]['brands'].add(brand)
+                    bucket['brands'].add(brand)
                 if model:
-                    identities[product['id']]['models'].add(model)
+                    bucket['models'].add(model)
+                if measurements:
+                    bucket['measurements'].add(json.dumps(measurements, ensure_ascii=False, sort_keys=True, separators=(',', ':')))
+                if ingredients:
+                    bucket['ingredients'].add(ingredients)
+                if material:
+                    bucket['materials'].add(material)
 
             metafields = []
-            brand_products = model_products = ambiguous_brand = ambiguous_model = 0
+            counters = defaultdict(int)
             for product_id, values in identities.items():
-                brands = {x for x in values['brands'] if x}
-                models = {x for x in values['models'] if x}
-                if len(brands) == 1:
-                    brand = next(iter(brands))
-                    metafields.append({
-                        'ownerId': product_id,
-                        'namespace': 'custom',
-                        'key': 'brand',
-                        'type': 'single_line_text_field',
-                        'value': brand,
-                    })
-                    brand_products += 1
-                elif len(brands) > 1:
-                    ambiguous_brand += 1
-
-                if len(models) == 1:
-                    model = next(iter(models))
-                    metafields.append({
-                        'ownerId': product_id,
-                        'namespace': 'custom',
-                        'key': 'model',
-                        'type': 'single_line_text_field',
-                        'value': model,
-                    })
-                    model_products += 1
-                elif len(models) > 1:
-                    ambiguous_model += 1
+                mapping = [
+                    ('brands', 'brand', 'single_line_text_field', 'brand_products', 'ambiguous_brand'),
+                    ('models', 'model', 'single_line_text_field', 'model_products', 'ambiguous_model'),
+                    ('measurements', 'measurements', 'json', 'measurement_products', 'ambiguous_measurements'),
+                    ('ingredients', 'ingredients', 'multi_line_text_field', 'ingredient_products', 'ambiguous_ingredients'),
+                    ('materials', 'material', 'single_line_text_field', 'material_products', 'ambiguous_material'),
+                ]
+                for source_key, mf_key, mf_type, ok_key, amb_key in mapping:
+                    vals = {x for x in values[source_key] if x}
+                    if len(vals) == 1:
+                        metafields.append({
+                            'ownerId': product_id,
+                            'namespace': 'custom',
+                            'key': mf_key,
+                            'type': mf_type,
+                            'value': next(iter(vals)),
+                        })
+                        counters[ok_key] += 1
+                    elif len(vals) > 1:
+                        counters[amb_key] += 1
 
             status.update(
                 matched=matched, conflicts=conflicts, unmatched=unmatched,
-                brand_products=brand_products, model_products=model_products,
-                ambiguous_brand=ambiguous_brand, ambiguous_model=ambiguous_model,
-                metafields_queued=len(metafields), phase='metafields'
+                metafields_queued=len(metafields), phase='metafields', **counters
             )
             base.core.write_status(status)
 
