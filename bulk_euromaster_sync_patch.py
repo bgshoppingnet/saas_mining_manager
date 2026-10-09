@@ -13,14 +13,39 @@ def install(mod):
         value['compareAtPrice'] = None
         return value
 
+    def match(item, idx):
+        source, sku, ean = idx
+
+        # Strongest key first. After the first Euromaster migration every
+        # matched/created canonical product carries supplier_sync.source_key.
+        # If that exact source key identifies one Euromaster product, use it
+        # immediately and do not let legacy duplicate SKU/EAN rows turn the
+        # otherwise exact match into a conflict.
+        sid = mod.low(mod.source_id(item))
+        if sid and source.get(sid):
+            tagged = [x for x in source[sid] if x[2] == 'euromaster']
+            exact = tagged if tagged else source[sid]
+            p, v, conf = mod.choose(exact)
+            if p and not conf:
+                return p, v, False
+
+        # Fallback only when no unique source-key canonical record exists.
+        checks = []
+        s = mod.low(item.get('sku'))
+        if s and sku.get(s):
+            checks.extend(sku[s])
+        e = mod.low(item.get('ean'))
+        if e and ean.get(e):
+            checks.extend(ean[e])
+        dedup = {(p['id'], (v or {}).get('id')): (p, v, supp) for p, v, supp in checks}
+        return mod.choose(list(dedup.values()))
+
     def op(phase, digest):
-        # Pass 2 deliberately uses new operation names for EVERY phase.
-        # The first pass created 1,151 products and updated 5,413, so reusing
-        # its completed index or mutations would classify against stale data.
-        # Shopify bulk operations remain idempotent through this pass-specific
-        # name and the catalog fingerprint/checkpoint.
-        return 'BGSEuromasterReconcileV2' + phase + digest
+        # New operation family forces a fresh Shopify index and fresh bulk jobs
+        # after the source-key reconciliation logic changed.
+        return 'BGSEuromasterReconcileV3' + phase + digest
 
     mod.variant_fields = variant_fields
+    mod.match = match
     mod.op = op
     return mod
