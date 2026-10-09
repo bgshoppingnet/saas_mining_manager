@@ -11,7 +11,7 @@ import bulk_search_discovery_sync as searchsync
 import bulk_bgelectronics_sync as base
 
 MAX_WAIT = int(os.getenv('SHOPIFY_BULK_MAX_WAIT_SECONDS', '680') or '680')
-VERSION = 'V1'
+VERSION = 'V2'
 
 
 def norm(value):
@@ -23,6 +23,8 @@ def canonical_brand(value):
     low = raw.casefold()
     if not raw:
         return ''
+    if low.startswith('raider pro') or low in {'raiderpro', 'raider pro tools'}:
+        return 'Raider Pro'
     if low.startswith('raider'):
         return 'Raider'
     if low in {'kikaboo', 'kikka boo', 'kikka-boo'}:
