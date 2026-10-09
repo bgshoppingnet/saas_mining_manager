@@ -1,4 +1,4 @@
-# Manual refresh trigger 2026-10-09: brand/model enrichment pipeline v3
+# Manual refresh trigger 2026-10-09: Raider Pro identity fix v4
 name: Update Feed CDN
 
 on:
