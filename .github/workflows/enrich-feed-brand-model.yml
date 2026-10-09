@@ -2,12 +2,9 @@ name: Enrich Feed Brand Model
 
 on:
   push:
-    branches: [feed-cdn]
+    branches: [main]
     paths:
-      - 'feeds/pazaruvaj.xml'
-      - 'feeds/google-shopping.xml'
-      - 'feeds/ai-products.json'
-      - 'feeds/last-updated.txt'
+      - '.github/workflows/enrich-feed-brand-model.yml'
   workflow_run:
     workflows: ["Update Feed CDN"]
     types: [completed]
@@ -53,14 +50,12 @@ jobs:
               low = raw.casefold()
               if not raw:
                   return ''
-              if low.startswith('raider pro') or low in {'raiderpro', 'raider pro tools'}:
-                  return 'Raider Pro'
               if low.startswith('raider'):
                   return 'Raider'
+              if low.startswith('lorelli') or low.startswith('loreli'):
+                  return 'Lorelli'
               if low in {'kikaboo', 'kikka boo', 'kikka-boo'}:
                   return 'KikkaBoo'
-              if low in {'loreli', 'lorelli'}:
-                  return 'Lorelli'
               if low.startswith('metabo'):
                   return 'Metabo'
               return raw
@@ -74,9 +69,7 @@ jobs:
               if len(t) < 4 or len(t) > 40:
                   return False
               compact = re.sub(r'[-_.+/]', '', t)
-              if not compact:
-                  return False
-              if compact.upper() in UNIT_CODES:
+              if not compact or compact.upper() in UNIT_CODES:
                   return False
               if re.fullmatch(r'\d+(?:\.\d+)?(?:V|W|KW|MM|CM|M|KG|G|ML|L|AH|MAH|RPM|NM|HZ|DB|MPA|BAR)', t, re.I):
                   return False
@@ -109,10 +102,8 @@ jobs:
                   body = re.sub(r'<manufacturer>.*?</manufacturer>', f'<manufacturer>{escape(brand)}</manufacturer>', body, count=1, flags=re.S | re.I)
               has_model = re.search(r'<Attribute_Name>\s*(?:Модел|Model)\s*</Attribute_Name>', body, re.I)
               if model and not has_model:
-                  body += ('\n<Attribute>'
-                           '<Attribute_Name>Модел</Attribute_Name>'
-                           f'<Attribute_Value>{escape(model)}</Attribute_Value>'
-                           '</Attribute>\n')
+                  body += ('\n<Attribute><Attribute_Name>Модел</Attribute_Name>'
+                           f'<Attribute_Value>{escape(model)}</Attribute_Value></Attribute>\n')
               return '<product>' + body + '</product>'
           text, pcount = product_re.subn(patch_pazar, text)
           if pcount < 1:
@@ -148,41 +139,52 @@ jobs:
           products = data.get('products') if isinstance(data, dict) else data
           if not isinstance(products, list) or not products:
               raise SystemExit('No AI products found')
-          enriched = 0
           for item in products:
               if not isinstance(item, dict):
                   continue
               b = item.get('brand')
               if isinstance(b, dict):
                   cb = canonical_brand(b.get('name'))
-                  if cb:
-                      b['name'] = cb
+                  if cb: b['name'] = cb
               else:
                   cb = canonical_brand(b)
-                  if cb:
-                      item['brand'] = cb
+                  if cb: item['brand'] = cb
               model = clean(item.get('model')) or infer_model(item.get('name'))
               if model:
                   item['model'] = model
                   item['mpn'] = model
-                  enriched += 1
           a.write_text(json.dumps(data, ensure_ascii=False, separators=(',', ':')) + '\n', encoding='utf-8')
-          print({'pazaruvaj_products': pcount, 'google_items': gcount, 'ai_products': len(products), 'ai_models': enriched})
+          print({'pazaruvaj_products': pcount, 'google_items': gcount, 'ai_products': len(products)})
           PY
 
-      - name: Validate enriched feeds
+      - name: Validate enriched feeds and RDP-HD57 identity
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
-          import json, xml.etree.ElementTree as ET
+          import json,re,html,xml.etree.ElementTree as ET
           ET.parse('feeds/pazaruvaj.xml')
           ET.parse('feeds/google-shopping.xml')
-          with open('feeds/ai-products.json', encoding='utf-8') as f:
-              data=json.load(f)
-          products=data.get('products', []) if isinstance(data, dict) else data
-          if not products:
-              raise SystemExit('AI feed has no products')
+          target='RDP-HD57'
+          def tag(body,name):
+              m=re.search(rf'<{re.escape(name)}>(.*?)</{re.escape(name)}>',body,re.S|re.I)
+              return html.unescape(m.group(1).strip()) if m else ''
+          g=open('feeds/google-shopping.xml',encoding='utf-8').read()
+          gb=next((b for b in re.findall(r'<item>(.*?)</item>',g,re.S|re.I) if target.casefold() in html.unescape(b).casefold()),None)
+          if not gb or tag(gb,'g:brand').casefold()!='raider' or tag(gb,'g:mpn').casefold()!=target.casefold():
+              raise SystemExit('Google RDP-HD57 identity failed')
+          p=open('feeds/pazaruvaj.xml',encoding='utf-8').read()
+          pb=next((b for b in re.findall(r'<product>(.*?)</product>',p,re.S|re.I) if target.casefold() in html.unescape(b).casefold()),None)
+          if not pb or tag(pb,'manufacturer').casefold()!='raider':
+              raise SystemExit('Pazaruvaj RDP-HD57 brand failed')
+          data=json.load(open('feeds/ai-products.json',encoding='utf-8'))
+          products=data.get('products',[]) if isinstance(data,dict) else data
+          x=next((i for i in products if isinstance(i,dict) and target.casefold() in ' '.join(str(i.get(k,'')) for k in ('name','model','mpn')).casefold()),None)
+          if not x: raise SystemExit('AI RDP-HD57 missing')
+          b=x.get('brand'); b=b.get('name','') if isinstance(b,dict) else b
+          if str(b).casefold()!='raider' or str(x.get('model','')).casefold()!=target.casefold() or str(x.get('mpn','')).casefold()!=target.casefold() or str(x.get('sku','')).casefold()==target.casefold():
+              raise SystemExit('AI RDP-HD57 identity failed')
+          print({'google_brand':tag(gb,'g:brand'),'google_mpn':tag(gb,'g:mpn'),'pazaruvaj_brand':tag(pb,'manufacturer'),'ai_brand':b,'ai_model':x.get('model'),'ai_mpn':x.get('mpn'),'ai_sku':x.get('sku')})
           PY
 
       - name: Publish enrichment safely
