@@ -47,7 +47,7 @@ def run():
         'state':'running','mode':'shopify_bulk','started_at':started,
         'suppliers':None,'shopify_auth':None,
         'lorelli':None,'inventory':None,'duplicates':None,
-        'euromaster':None,'promotions':None,'fatal_error':None,
+        'euromaster':None,'bgelectronics':None,'promotions':None,'fatal_error':None,
     }
     write_status(result)
     try:
@@ -67,6 +67,7 @@ def run():
         import bulk_duplicate_cleanup
         import bulk_euromaster_sync
         import bulk_euromaster_sync_patch
+        import bulk_bgelectronics_sync
         import bulk_clear_promotions
 
         bulk_shopify_sync = importlib.reload(bulk_shopify_sync)
@@ -75,12 +76,10 @@ def run():
         bulk_shopify_sync.TOKEN = os.environ.get('SHOPIFY_ADMIN_ACCESS_TOKEN', '').strip()
         bulk_shopify_sync.SHOP = os.environ.get('SHOPIFY_SHOP_DOMAIN', '').strip()
 
-        # 1) Lorelli catalog
         result['lorelli'] = bulk_shopify_sync.run()
         lorelli_state = (result['lorelli'] or {}).get('state', '')
         write_status(result)
 
-        # 2) Lorelli exact stock
         if lorelli_state not in ('failed','checkpoint_wait'):
             bulk_inventory_sync = importlib.reload(bulk_inventory_sync)
             bulk_inventory_sync.core.TOKEN = os.environ.get('SHOPIFY_ADMIN_ACCESS_TOKEN', '').strip()
@@ -89,7 +88,6 @@ def run():
             write_status(result)
         inventory_state = (result['inventory'] or {}).get('state', '') if result['inventory'] else ''
 
-        # 3) Lorelli safe legacy duplicate archive
         if lorelli_state not in ('failed','checkpoint_wait') and inventory_state not in ('failed','checkpoint_wait'):
             bulk_duplicate_cleanup = importlib.reload(bulk_duplicate_cleanup)
             bulk_duplicate_cleanup.core.TOKEN = os.environ.get('SHOPIFY_ADMIN_ACCESS_TOKEN', '').strip()
@@ -98,8 +96,6 @@ def run():
             write_status(result)
         duplicate_state = (result['duplicates'] or {}).get('state', '') if result['duplicates'] else ''
 
-        # 4) Euromaster. Apply the current Shopify schema compatibility patch
-        # before running. It also clears compare-at pricing on touched variants.
         if all(x not in ('failed','checkpoint_wait') for x in (lorelli_state, inventory_state, duplicate_state)):
             bulk_euromaster_sync = importlib.reload(bulk_euromaster_sync)
             bulk_euromaster_sync_patch = importlib.reload(bulk_euromaster_sync_patch)
@@ -114,10 +110,21 @@ def run():
             write_status(result)
         euromaster_state = (result['euromaster'] or {}).get('state', '') if result['euromaster'] else ''
 
-        # 5) Promotions OFF for now. Restore compare-at value as the regular
-        # price and clear compareAtPrice on every active reduced-price variant.
-        # Supplier/product promotions will be reintroduced later with explicit rules.
+        # Next supplier: BGElectronics. Promotions are intentionally ignored.
         if euromaster_state == 'completed':
+            bulk_bgelectronics_sync = importlib.reload(bulk_bgelectronics_sync)
+            token = os.environ.get('SHOPIFY_ADMIN_ACCESS_TOKEN', '').strip()
+            shop = os.environ.get('SHOPIFY_SHOP_DOMAIN', '').strip()
+            bulk_bgelectronics_sync.core.TOKEN = token
+            bulk_bgelectronics_sync.core.SHOP = shop
+            bulk_bgelectronics_sync.invcore.core.TOKEN = token
+            bulk_bgelectronics_sync.invcore.core.SHOP = shop
+            result['bgelectronics'] = bulk_bgelectronics_sync.run()
+            write_status(result)
+        bge_state = (result['bgelectronics'] or {}).get('state', '') if result['bgelectronics'] else ''
+
+        # Keep promotions OFF globally after all current supplier writes.
+        if bge_state == 'completed':
             bulk_clear_promotions = importlib.reload(bulk_clear_promotions)
             bulk_clear_promotions.core.TOKEN = os.environ.get('SHOPIFY_ADMIN_ACCESS_TOKEN', '').strip()
             bulk_clear_promotions.core.SHOP = os.environ.get('SHOPIFY_SHOP_DOMAIN', '').strip()
@@ -125,7 +132,7 @@ def run():
             write_status(result)
         promotion_state = (result['promotions'] or {}).get('state', '') if result['promotions'] else ''
 
-        states=[lorelli_state,inventory_state,duplicate_state,euromaster_state,promotion_state]
+        states=[lorelli_state,inventory_state,duplicate_state,euromaster_state,bge_state,promotion_state]
         if 'failed' in states:
             result['state']='failed'
         elif 'checkpoint_wait' in states:
