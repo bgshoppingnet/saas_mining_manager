@@ -22,5 +22,10 @@ def install(mod):
             if u and u not in out:
                 out.append(u)
         return out[:10]
+
+    def op(phase,digest):
+        return 'BGSBGElectronicsV2' + phase + digest
+
     mod.images = images
+    mod.op = op
     return mod
