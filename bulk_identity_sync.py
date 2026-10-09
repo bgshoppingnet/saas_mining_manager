@@ -29,7 +29,7 @@ def canonical_brand(value):
         return 'Raider'
     if low in {'kikaboo', 'kikka boo', 'kikka-boo'}:
         return 'KikkaBoo'
-    if low in {'loreli', 'lorelli'}:
+    if low.startswith('lorelli') or low.startswith('loreli'):
         return 'Lorelli'
     if low.startswith('metabo'):
         return 'Metabo'
