@@ -20,7 +20,7 @@ lock = threading.Lock()
 
 PRODUCTS_QUERY = '''
 query FeedProducts($cursor: String) {
-  products(first: 250, after: $cursor, query: "status:active", sortKey: ID) {
+  products(first: 100, after: $cursor, query: "status:active", sortKey: ID) {
     pageInfo { hasNextPage endCursor }
     nodes {
       id
@@ -31,7 +31,7 @@ query FeedProducts($cursor: String) {
       descriptionHtml
       featuredImage { url }
       images(first: 3) { nodes { url } }
-      variants(first: 100) {
+      variants(first: 20) {
         nodes {
           id
           title
@@ -97,21 +97,46 @@ def admin_gql(session, query, variables=None):
     if not shop or not token:
         raise RuntimeError('Shopify Admin API is not configured after authentication')
     url = f'https://{shop}/admin/api/{SHOPIFY_API_VERSION}/graphql.json'
-    r = session.post(
-        url,
-        headers={
-            'X-Shopify-Access-Token': token,
-            'Content-Type': 'application/json',
-            'User-Agent': 'BGShopping-Pazaruvaj-Feed/7.2',
-        },
-        json={'query': query, 'variables': variables or {}},
-        timeout=(20, 120),
-    )
-    r.raise_for_status()
-    data = r.json()
-    if data.get('errors'):
-        raise RuntimeError('Shopify GraphQL: ' + json.dumps(data['errors'], ensure_ascii=False))
-    return data.get('data') or {}
+
+    last_error = None
+    for attempt in range(1, 11):
+        try:
+            r = session.post(
+                url,
+                headers={
+                    'X-Shopify-Access-Token': token,
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'BGShopping-Pazaruvaj-Feed/7.3',
+                },
+                json={'query': query, 'variables': variables or {}},
+                timeout=(20, 120),
+            )
+            if r.status_code == 429:
+                retry_after = int(r.headers.get('Retry-After') or '2')
+                print(json.dumps({'feed_build':'throttled','attempt':attempt,'retry_after':retry_after}, ensure_ascii=False), flush=True)
+                time.sleep(min(max(retry_after, 1), 15))
+                continue
+            r.raise_for_status()
+            data = r.json()
+            errors = data.get('errors') or []
+            if errors:
+                throttled = any((e.get('extensions') or {}).get('code') == 'THROTTLED' for e in errors if isinstance(e, dict))
+                if throttled:
+                    delay = min(2 * attempt, 15)
+                    print(json.dumps({'feed_build':'throttled','attempt':attempt,'retry_after':delay}, ensure_ascii=False), flush=True)
+                    time.sleep(delay)
+                    continue
+                raise RuntimeError('Shopify GraphQL: ' + json.dumps(errors, ensure_ascii=False))
+            return data.get('data') or {}
+        except requests.RequestException as e:
+            last_error = e
+            if attempt >= 10:
+                raise
+            delay = min(2 * attempt, 15)
+            print(json.dumps({'feed_build':'http_retry','attempt':attempt,'error':f'{type(e).__name__}: {e}','retry_after':delay}, ensure_ascii=False), flush=True)
+            time.sleep(delay)
+
+    raise RuntimeError(f'Shopify Admin GraphQL retries exhausted: {last_error}')
 
 
 def product_xml(p):
@@ -225,12 +250,7 @@ def build_feed_once():
                     state['variants'] = variant_count
 
                 if page == 1 or page % 10 == 0:
-                    print(json.dumps({
-                        'feed_build': 'progress',
-                        'page': page,
-                        'products': product_count,
-                        'variants': variant_count,
-                    }, ensure_ascii=False), flush=True)
+                    print(json.dumps({'feed_build':'progress','page':page,'products':product_count,'variants':variant_count}, ensure_ascii=False), flush=True)
 
                 pi = conn.get('pageInfo') or {}
                 if not pi.get('hasNextPage'):
@@ -256,15 +276,7 @@ def build_feed_once():
             state['pages'] = page
             state['last_error'] = None
 
-        print(json.dumps({
-            'feed_build': 'completed',
-            'products': product_count,
-            'variants': variant_count,
-            'bytes': size,
-            'source': 'Shopify Admin GraphQL',
-            'pages': page,
-            'auth_mode': (auth or {}).get('mode'),
-        }, ensure_ascii=False), flush=True)
+        print(json.dumps({'feed_build':'completed','products':product_count,'variants':variant_count,'bytes':size,'source':'Shopify Admin GraphQL','pages':page,'auth_mode':(auth or {}).get('mode')}, ensure_ascii=False), flush=True)
         return True
 
     except Exception as e:
@@ -275,35 +287,28 @@ def build_feed_once():
             pass
         with lock:
             state['last_error'] = f'{type(e).__name__}: {e}'
-        print(json.dumps({'feed_build': 'failed', 'error': state['last_error']}, ensure_ascii=False), flush=True)
+        print(json.dumps({'feed_build':'failed','error':state['last_error']}, ensure_ascii=False), flush=True)
         return False
     finally:
         with lock:
             state['building'] = False
 
 
-def feed_loop():
+def orchestrator_loop():
     while True:
-        build_feed_once()
-        time.sleep(REFRESH_SECONDS)
-
-
-def catalog_loop():
-    if not ENABLE_CATALOG_SYNC:
-        return
-    while True:
-        try:
-            print(json.dumps({'catalog_sync':'starting'}, ensure_ascii=False), flush=True)
-            result = run_catalog_sync()
-            print(json.dumps({'catalog_sync':'finished','state':(result or {}).get('state')}, ensure_ascii=False), flush=True)
-        except Exception as e:
-            print(json.dumps({'catalog_sync_error': f'{type(e).__name__}: {e}'}, ensure_ascii=False), flush=True)
+        feed_ok = build_feed_once()
+        if ENABLE_CATALOG_SYNC:
+            try:
+                print(json.dumps({'catalog_sync':'starting_after_feed','feed_ok':feed_ok}, ensure_ascii=False), flush=True)
+                result = run_catalog_sync()
+                print(json.dumps({'catalog_sync':'finished','state':(result or {}).get('state')}, ensure_ascii=False), flush=True)
+            except Exception as e:
+                print(json.dumps({'catalog_sync_error':f'{type(e).__name__}: {e}'}, ensure_ascii=False), flush=True)
         time.sleep(REFRESH_SECONDS)
 
 
 def start_builders():
-    threading.Thread(target=feed_loop, name='bgshopping-feed-builder', daemon=True).start()
-    threading.Thread(target=catalog_loop, name='bgshopping-catalog-sync', daemon=True).start()
+    threading.Thread(target=orchestrator_loop, name='bgshopping-feed-and-catalog', daemon=True).start()
 
 
 @app.get('/')
@@ -346,43 +351,18 @@ def shopify_sync_status():
 @app.get('/pazaruvaj.xml')
 def pazaruvaj():
     if not os.path.exists(FEED_PATH) or os.path.getsize(FEED_PATH) <= 1000:
-        return Response(
-            '<?xml version="1.0" encoding="UTF-8"?>\n<products></products>\n',
-            status=503,
-            content_type='application/xml; charset=utf-8',
-            headers={'Retry-After': '60', 'Cache-Control': 'no-store'},
-        )
+        return Response('<?xml version="1.0" encoding="UTF-8"?>\n<products></products>\n', status=503, content_type='application/xml; charset=utf-8', headers={'Retry-After':'60','Cache-Control':'no-store'})
 
     try:
         with open(FEED_PATH, 'rb') as f:
             payload = f.read()
     except Exception as e:
-        return Response(
-            f'<?xml version="1.0" encoding="UTF-8"?>\n<error>{esc(type(e).__name__)}</error>\n',
-            status=503,
-            content_type='application/xml; charset=utf-8',
-            headers={'Retry-After': '60', 'Cache-Control': 'no-store'},
-        )
+        return Response(f'<?xml version="1.0" encoding="UTF-8"?>\n<error>{esc(type(e).__name__)}</error>\n', status=503, content_type='application/xml; charset=utf-8', headers={'Retry-After':'60','Cache-Control':'no-store'})
 
     if len(payload) <= 1000 or b'<product>' not in payload:
-        return Response(
-            '<?xml version="1.0" encoding="UTF-8"?>\n<products></products>\n',
-            status=503,
-            content_type='application/xml; charset=utf-8',
-            headers={'Retry-After': '60', 'Cache-Control': 'no-store'},
-        )
+        return Response('<?xml version="1.0" encoding="UTF-8"?>\n<products></products>\n', status=503, content_type='application/xml; charset=utf-8', headers={'Retry-After':'60','Cache-Control':'no-store'})
 
-    return Response(
-        payload,
-        status=200,
-        content_type='application/xml; charset=utf-8',
-        headers={
-            'Cache-Control': 'public, max-age=300',
-            'Content-Length': str(len(payload)),
-            'X-BGShopping-Feed-Products': str(state.get('products', 0)),
-            'X-BGShopping-Feed-Variants': str(state.get('variants', 0)),
-        },
-    )
+    return Response(payload, status=200, content_type='application/xml; charset=utf-8', headers={'Cache-Control':'public, max-age=300','Content-Length':str(len(payload)),'X-BGShopping-Feed-Products':str(state.get('products',0)),'X-BGShopping-Feed-Variants':str(state.get('variants',0))})
 
 
 start_builders()
