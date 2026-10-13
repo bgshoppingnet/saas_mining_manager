@@ -132,19 +132,42 @@ def normalize_price_currency(supplier, price, currency):
     return price, (currency_key or 'EUR')
 
 
+def clean_product_name(value):
+    name = str(value or '').strip()
+    brands = (
+        'RAIDER INDUSTRIAL', 'RAIDER PRO', 'GREEN TOOLS', 'TOP MASTER PRO',
+        'TOP MASTER', 'TOP GARDEN', 'TOP STRONG', 'TOP CHROME',
+        'RAIDER', 'GARDEX', 'BAUKRAFT', 'METABO',
+    )
+    for brand in brands:
+        pattern = r'\b(' + re.escape(brand) + r')(?:\s+' + re.escape(brand) + r'){1,}\b'
+        name = re.sub(pattern, r'\1', name, flags=re.I)
+    return name
+
+
+def exact_quantity_text(value):
+    value = str(value or '').strip().replace(',', '.')
+    if not re.fullmatch(r'\d+(?:\.0+)?', value):
+        return ''
+    return str(int(value.split('.')[0]))
+
+
 def normalize(node, supplier):
     supplier_key = str(supplier or '').strip().lower()
     sku = text(node, {'sku','pnumber','code','product_code','item_code','model','model_code','catalog_number'})
     ean = text(node, {'ean','barcode','gtin','ean13','upc'})
     ext_id = text(node, {'id','product_id','item_id','offer_id'})
-    name = text(node, {'name','name_bg','title','product_name','title_bg'})
+    name = clean_product_name(text(node, {'name','name_bg','title','product_name','title_bg'}))
 
     if supplier_key == 'bgelectronics':
         # Regular customer price only. Supplier promo field CustumerPromotionPrice
         # is intentionally ignored until BGShopping promotions are re-enabled.
         price = text(node, {'end_price'})
         in_stock = text(node, {'in_stock'}).strip().lower()
-        qty = '5' if in_stock in {'1','true','yes','да'} else '0'
+        raw_qty = text(node, {'quantity','qty','stock_quantity','available_quantity'})
+        qty = exact_quantity_text(raw_qty)
+        if not qty and in_stock in {'0','false','no','не','out of stock'}:
+            qty = '0'
         description = text(node, {'product_description','description'})
         category = text(node, {'category_full','category_name','category'})
         currency = 'BGN'
@@ -174,7 +197,7 @@ def normalize(node, supplier):
     key = ean or sku or ext_id or (name + '|' + supplier)
     if not key.strip():
         return None
-    return {
+    item = {
         'supplier': supplier,
         'key': key.strip(),
         'sku': sku,
@@ -191,6 +214,10 @@ def normalize(node, supplier):
         'brand': brand,
         'category': category,
     }
+
+    if supplier_key == 'bgelectronics':
+        item['quantity_is_exact'] = bool(qty)
+    return item
 
 
 def fetch_feed(session, cfg):
