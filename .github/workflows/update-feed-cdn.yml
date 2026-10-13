@@ -1,4 +1,4 @@
-# Manual refresh trigger 2026-10-09: Raider Pro identity fix v4
+# Refresh after complete published-catalog export and exact-stock safeguards, 2026-10-13
 name: Update Feed CDN
 
 on:
