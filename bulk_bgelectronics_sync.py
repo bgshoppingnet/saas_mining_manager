@@ -19,6 +19,12 @@ def qty(v):
     except Exception: return None
 
 
+def supplied_quantity(item):
+    if low(item.get('supplier')) == 'bgelectronics' and not item.get('quantity_is_exact', False):
+        return None
+    return qty(item.get('quantity'))
+
+
 def load_rows():
     out=[]
     with open(CATALOG_PATH,encoding='utf-8') as f:
@@ -161,7 +167,7 @@ def create_vars(item):
     p['productOptions']=[{'name':'Title','position':1,'values':[{'name':'Default Title'}]}]
     v=variant_fields(item,final=True)
     v['optionValues']=[{'optionName':'Title','name':'Default Title'}]
-    q=qty(item.get('quantity'))
+    q=supplied_quantity(item)
     if q is not None and LOCATION_ID:
         v['inventoryQuantities']=[{'locationId':LOCATION_ID,'name':'available','quantity':q}]
     p['variants']=[v]
@@ -230,7 +236,7 @@ def run():
             if variants is None: status['state']='checkpoint_wait'; core.write_status(status); return status
             inv_idx=invcore.build_indexes(variants); quantities=[]
             for item in rows:
-                q=qty(item.get('quantity'))
+                q=supplied_quantity(item)
                 if q is None: continue
                 v,conf=invcore.match(item,inv_idx)
                 if conf or not v or not v.get('inventoryItemId'): continue
