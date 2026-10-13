@@ -115,7 +115,7 @@ jobs:
           item_re = re.compile(r'<item>(.*?)</item>', re.S | re.I)
           def patch_google(match):
               body = match.group(1)
-              title = tag_value(body, 'title')
+              title = tag_value(body, 'title') or tag_value(body, 'g:title')
               brand_m = re.search(r'<g:brand>(.*?)</g:brand>', body, re.S | re.I)
               if brand_m:
                   old = html.unescape(brand_m.group(1).strip())
