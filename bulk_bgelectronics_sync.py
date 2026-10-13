@@ -20,7 +20,7 @@ def qty(v):
 
 
 def supplied_quantity(item):
-    if low(item.get('supplier')) == 'bgelectronics' and not item.get('quantity_is_exact', False):
+    if low(item.get('supplier')) in {'bgelectronics', 'kikkaboo', 'sonne', 'playfactory'} and not item.get('quantity_is_exact', False):
         return None
     return qty(item.get('quantity'))
 
