@@ -11,8 +11,8 @@ CYCLE_SECONDS = int(os.getenv('SHOPIFY_INVENTORY_CYCLE_SECONDS', '14400') or '14
 LORELLI_URL = os.getenv('LORELLI_FEED_URL', sw.DEFAULT_FEEDS[0]['url'])
 
 STOCK_FIELDS = {
-    'quantity','qty','stock','stock_quantity','stock_amount','onstock','on_stock',
-    'instock','in_stock','inventory_quantity','available_quantity','free_stock',
+    'quantity','qty','stock','stock_quantity','stock_amount','on_stock',
+    'inventory_quantity','available_quantity','free_stock',
     'warehouse_stock','stocklevel','stock_level'
 }
 AVAIL_FIELDS = {
@@ -38,25 +38,21 @@ def low(v):
 
 def safe_int(v):
     s = norm(v).replace(',', '.')
-    if not s:
+    if not re.fullmatch(r'\d+(?:\.0+)?', s):
         return None
-    try:
-        return max(0, int(float(s)))
-    except Exception:
-        m = re.search(r'-?\d+', s)
-        return max(0, int(m.group(0))) if m else None
+    return int(s.split('.')[0])
 
 
 def status_qty(v):
     s = low(v)
     if s in IN_STATUS:
-        return 5
+        return None
     if s in OUT_STATUS:
         return 0
     if any(x in s for x in ('out of stock','изчерпан','няма наличност','unavailable')):
         return 0
     if any(x in s for x in ('in stock','в наличност','на склад','available')):
-        return 5
+        return None
     return None
 
 
@@ -111,7 +107,7 @@ def derive_quantity_map():
                         break
             if q is not None:
                 break
-        # If exact quantity is absent, map explicit availability state to 5/0.
+        # Explicit unavailability proves zero; positive availability is not a quantity.
         if q is None:
             for child in node.iter():
                 if child is node:
@@ -148,9 +144,8 @@ def derive_quantity_map():
 
 
 def desired_qty(item, qmap):
-    q = safe_int(item.get('quantity'))
-    if q is not None:
-        return q
+    # Only the current raw supplier feed can establish exact quantities.
+    # Normalized catalog rows may contain historical availability placeholders.
     for value in (item.get('sku'), item.get('ean'), item.get('external_id')):
         k = low(value)
         if k and k in qmap:
