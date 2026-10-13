@@ -40,7 +40,7 @@ def prepare(source):
             images = row.get('image') or []
             if isinstance(images, str):
                 images = [images]
-            images = list(dict.fromkeys(u for u in images if isinstance(u, str) and urlsplit(u).scheme == 'https' and urlsplit(u).netloc))
+            images = list(dict.fromkeys(u for u in images if isinstance(u, str) and urlsplit(u).scheme == 'https' and urlsplit(u).netloc and not re.search(r'no[-_]?image|placeholder|default[-_]?image', u, re.I)))
             if not images:
                 excluded['missing_image'] += 1
                 continue
