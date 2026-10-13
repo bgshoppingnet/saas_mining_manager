@@ -112,6 +112,9 @@ jobs:
 
           g = FEEDS / 'google-shopping.xml'
           text = g.read_text(encoding='utf-8')
+          # ElementTree may serialize the Google namespace as ns0.
+          text = text.replace('xmlns:ns0="http://base.google.com/ns/1.0"', 'xmlns:g="http://base.google.com/ns/1.0"')
+          text = text.replace('<ns0:', '<g:').replace('</ns0:', '</g:')
           item_re = re.compile(r'<item>(.*?)</item>', re.S | re.I)
           def patch_google(match):
               body = match.group(1)
