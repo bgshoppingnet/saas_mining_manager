@@ -1,0 +1,13 @@
+{
+  "source_generated_at": "2026-10-13T02:05:59Z",
+  "currency": "EUR",
+  "source_rows": 20056,
+  "pazaruvaj_products": 13977,
+  "google_products": 19758,
+  "ai_products": 19758,
+  "shopmania_products": 10000,
+  "shopmania_limit": 10000,
+  "excluded": {
+    "missing_image": 298
+  }
+}
