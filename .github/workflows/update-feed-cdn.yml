@@ -116,6 +116,34 @@ jobs:
           grep -q '<g:country>BG</g:country>' tmp-feeds/google-shopping.xml
           grep -q '<g:service>Standard</g:service>' tmp-feeds/google-shopping.xml
 
+      - name: Validate unique identifiers and build ShopMania feed
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp tmp-feeds/ai-products.json feeds/ai-products.json
+          python scripts/rebuild_channel_feeds.py
+          python - <<'PY'
+          import copy
+          import xml.etree.ElementTree as E
+          ns = '{http://base.google.com/ns/1.0}'
+          original = E.parse('tmp-feeds/google-shopping.xml')
+          shipping = {}
+          for item in original.getroot().findall('./channel/item'):
+              link = item.findtext('link') or item.findtext(ns + 'link')
+              entries = item.findall(ns + 'shipping')
+              if link and entries:
+                  shipping[link] = entries
+          updated = E.parse('feeds/google-shopping.xml')
+          for item in updated.getroot().findall('./channel/item'):
+              link = item.findtext(ns + 'link') or item.findtext('link')
+              for entry in shipping.get(link, []):
+                  item.append(copy.deepcopy(entry))
+          updated.write('feeds/google-shopping.xml', encoding='utf-8', xml_declaration=True)
+          PY
+          cp feeds/pazaruvaj.xml tmp-feeds/pazaruvaj.xml
+          cp feeds/google-shopping.xml tmp-feeds/google-shopping.xml
+          cp feeds/ai-products.json tmp-feeds/ai-products.json
+
       - name: Publish atomically to branch
         shell: bash
         run: |
