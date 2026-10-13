@@ -13,7 +13,7 @@ CATALOG_STATUS_PATH=os.getenv('CATALOG_SYNC_STATUS_PATH','/tmp/catalog-sync-stat
 SUPPLIER_STATUS_PATH=os.getenv('SUPPLIER_STATUS_PATH','/tmp/supplier-status.json')
 SHOPIFY_STATUS_PATH=os.getenv('SHOPIFY_SYNC_STATUS_PATH','/tmp/shopify-sync-status.json')
 state={'building':False,'last_ok':None,'last_error':None,'products':0,'variants':0,'bytes':0,'pages':0,'google_items':0,'google_bytes':0,'ai_items':0,'ai_bytes':0}; lock=threading.Lock()
-PRODUCTS_QUERY='''query FeedProducts($cursor:String){products(first:100,after:$cursor,query:"status:active",sortKey:ID){pageInfo{hasNextPage endCursor}nodes{id title handle vendor productType descriptionHtml featuredImage{url} images(first:3){nodes{url}} brand:metafield(namespace:"custom",key:"brand"){value} model:metafield(namespace:"custom",key:"model"){value} measurements:metafield(namespace:"custom",key:"measurements"){value} ingredients:metafield(namespace:"custom",key:"ingredients"){value} material:metafield(namespace:"custom",key:"material"){value} variants(first:20){nodes{id title sku barcode price availableForSale image{url}}}}}}}'''
+PRODUCTS_QUERY='''{products(query:"status:active published_status:published"){edges{node{__typename id title handle vendor productType descriptionHtml featuredImage{url} brand:metafield(namespace:"custom",key:"brand"){value} model:metafield(namespace:"custom",key:"model"){value} measurements:metafield(namespace:"custom",key:"measurements"){value} ingredients:metafield(namespace:"custom",key:"ingredients"){value} material:metafield(namespace:"custom",key:"material"){value} variants{edges{node{__typename id title sku barcode price availableForSale image{url}}}} media{edges{node{__typename status ... on MediaImage{id image{url}}}}}}}}}'''
 LABELS={'weight':'Тегло','length':'Дължина','width':'Ширина','height':'Височина','depth':'Дълбочина','diameter':'Диаметър','volume':'Обем','capacity':'Вместимост','voltage':'Напрежение','power':'Мощност','battery_capacity':'Капацитет на батерията','torque':'Въртящ момент','pressure':'Налягане','frequency':'Честота','speed':'Обороти','unit_mentions':'Технически стойности'}
 def esc(v): return html.escape(str(v or ''),quote=False)
 def strip_html(s): return ' '.join(html.unescape(re.sub(r'<[^>]+>',' ',s or '')).split())
@@ -67,6 +67,53 @@ def gql(session,q,vars=None):
             if attempt>=10: raise
             time.sleep(min(2*attempt,15))
     raise RuntimeError('Shopify GraphQL retries exhausted')
+def load_bulk_products(session):
+    mutation = 'mutation BulkFeedSnapshot($query:String!){bulkOperationRunQuery(query:$query,groupObjects:false){bulkOperation{id status} userErrors{field message}}}'
+    payload = gql(session, mutation, {'query': PRODUCTS_QUERY}).get('bulkOperationRunQuery') or {}
+    if payload.get('userErrors'):
+        raise RuntimeError('Feed export rejected: ' + json.dumps(payload['userErrors']))
+    operation = payload.get('bulkOperation') or {}
+    if not operation.get('id'):
+        raise RuntimeError('Feed export did not return an operation')
+    poll = 'query BulkFeedSnapshotStatus($ids:[ID!]!){nodes(ids:$ids){...on BulkOperation{id status url errorCode}}}'
+    deadline = time.monotonic() + 240
+    while time.monotonic() < deadline:
+        nodes = gql(session, poll, {'ids': [operation['id']]}).get('nodes') or []
+        current = nodes[0] if nodes else {}
+        status = current.get('status')
+        if status == 'COMPLETED':
+            operation = current
+            break
+        if status in ('FAILED', 'CANCELED', 'EXPIRED'):
+            raise RuntimeError('Feed export failed: ' + str(current.get('errorCode') or status))
+        time.sleep(2)
+    else:
+        raise RuntimeError('Feed export timed out')
+    if not operation.get('url'):
+        raise RuntimeError('Completed feed export has no download URL')
+    products, variants, images = {}, {}, {}
+    with session.get(operation['url'], timeout=(20, 180), stream=True) as response:
+        response.raise_for_status()
+        response.encoding = 'utf-8'
+        for line in response.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+            row = json.loads(line)
+            kind, parent = row.get('__typename'), row.get('__parentId')
+            if kind == 'Product':
+                products[row['id']] = row
+            elif kind == 'ProductVariant' and parent:
+                variants.setdefault(parent, []).append(row)
+            elif kind == 'MediaImage' and parent and row.get('status') == 'READY':
+                url = (row.get('image') or {}).get('url')
+                if url:
+                    images.setdefault(parent, []).append({'url': url})
+    for product_id, product in products.items():
+        product['variants'] = {'nodes': variants.get(product_id, [])}
+        product['images'] = {'nodes': images.get(product_id, [])}
+        yield product
+
+
 def base_data(p):
     h=(p.get('handle') or '').strip()
     if not h:return None
@@ -75,7 +122,7 @@ def base_data(p):
         u=((x or {}).get('url') or '').strip()
         if u and u not in imgs:imgs.append(u)
     f=((p.get('featuredImage') or {}).get('url') or '').strip()
-    if f and f not in imgs:imgs.insert(0,f)
+    if f:imgs=[f]+[u for u in imgs if u!=f]
     return {'handle':h,'brand':canonical_brand(mf(p,'brand') or (p.get('vendor') or '').strip()),'model':mf(p,'model'),'measurements':measures(mf(p,'measurements')),'ingredients':mf(p,'ingredients'),'material':mf(p,'material'),'product_type':(p.get('productType') or '').strip(),'description':strip_html(p.get('descriptionHtml') or ''),'title':(p.get('title') or '').strip(),'images':imgs[:3]}
 def variant(base,v):
     if not base:return None
@@ -142,27 +189,22 @@ def build():
         auth=ensure_shopify_access_token(); s=requests.Session(); pp=pv=gi=aii=page=0; cursor=None; first=True
         with open(tmp[0],'w',encoding='utf-8',newline='\n') as pf,open(tmp[1],'w',encoding='utf-8',newline='\n') as gf,open(tmp[2],'w',encoding='utf-8',newline='\n') as af:
             pf.write('<?xml version="1.0" encoding="UTF-8"?>\n<products>\n'); gf.write('<?xml version="1.0" encoding="UTF-8"?>\n<rss version="2.0" xmlns:g="http://base.google.com/ns/1.0">\n<channel>\n<title>BGShopping.net Product Feed</title>\n'+f'<link>{esc(PUBLIC_SHOP_URL)}</link>\n<description>BGShopping.net product catalog for shopping channels</description>\n'); af.write('{"@context":"https://schema.org","generated_at":'+json.dumps(time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()))+',"currency":"EUR","products":[\n')
-            while True:
-                page+=1; conn=(gql(s,PRODUCTS_QUERY,{'cursor':cursor}).get('products') or {})
-                for p in conn.get('nodes') or []:
-                    b=base_data(p); wrote=False
-                    for v in ((p.get('variants') or {}).get('nodes') or []):
-                        d=variant(b,v)
-                        if not d:continue
-                        z=pazar(d)
-                        if z:pf.write(z); pv+=1; wrote=True
-                        z=google(d)
-                        if z:gf.write(z); gi+=1
-                        z=ai(d)
-                        if z:
-                            if not first:af.write(',\n')
-                            af.write(json.dumps(z,ensure_ascii=False,separators=(',',':'))); first=False; aii+=1
-                    if wrote:pp+=1
-                with lock:state.update(pages=page,products=pp,variants=pv,google_items=gi,ai_items=aii)
-                pi=conn.get('pageInfo') or {}
-                if not pi.get('hasNextPage'):break
-                cursor=pi.get('endCursor')
-                if not cursor or page>=1000:break
+            for scanned, p in enumerate(load_bulk_products(s), 1):
+                b=base_data(p); wrote=False
+                for v in ((p.get('variants') or {}).get('nodes') or []):
+                    d=variant(b,v)
+                    if not d:continue
+                    z=pazar(d)
+                    if z:pf.write(z); pv+=1; wrote=True
+                    z=google(d)
+                    if z:gf.write(z); gi+=1
+                    z=ai(d)
+                    if z:
+                        if not first:af.write(',\n')
+                        af.write(json.dumps(z,ensure_ascii=False,separators=(',',':'))); first=False; aii+=1
+                if wrote:pp+=1
+                page=1
+                with lock:state.update(pages=page,scanned_products=scanned,products=pp,variants=pv,google_items=gi,ai_items=aii)
             pf.write('</products>\n'); gf.write('</channel>\n</rss>\n'); af.write('\n]}\n')
             for f in (pf,gf,af):f.flush();os.fsync(f.fileno())
         sizes=[os.path.getsize(x) for x in tmp]
@@ -182,6 +224,9 @@ def build():
         with lock:state['building']=False
 def loop():
     while True:
+        # Recreate ephemeral feed files promptly after a free-instance restart.
+        if not state.get('last_ok'):
+            build()
         if ENABLE_CATALOG_SYNC:
             try:
                 r=run_catalog_sync(); print(json.dumps({'catalog_sync':'finished','state':(r or {}).get('state')},ensure_ascii=False),flush=True)
