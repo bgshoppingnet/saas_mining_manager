@@ -215,7 +215,14 @@ def normalize(node, supplier):
         'category': category,
     }
 
-    if supplier_key == 'bgelectronics':
+    if supplier_key in {'kikkaboo', 'sonne', 'playfactory'}:
+        raw_qty = text(node, {'quantity','qty','stock_quantity','available_quantity'})
+        item['quantity'] = exact_quantity_text(raw_qty)
+        availability = text(node, {'availability','availability_status','in_stock'}).strip().lower()
+        if not item['quantity'] and availability in {'0','false','no','out of stock','unavailable','изчерпан','изчерпано'}:
+            item['quantity'] = '0'
+        item['quantity_is_exact'] = bool(item['quantity'])
+    elif supplier_key == 'bgelectronics':
         item['quantity_is_exact'] = bool(qty)
     return item
 
