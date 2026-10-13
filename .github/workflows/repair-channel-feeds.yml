@@ -1,0 +1,34 @@
+name: Validate and rebuild shopping feeds
+on:
+  push:
+    branches: [feed-cdn]
+    paths:
+      - scripts/rebuild_channel_feeds.py
+      - .github/workflows/repair-channel-feeds.yml
+      - feeds/ai-products.json
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: bgshopping-channel-feeds
+  cancel-in-progress: false
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feed-cdn
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python scripts/rebuild_channel_feeds.py
+      - name: Commit validated feeds
+        run: |
+          git config user.name 'BGShopping Feed Builder'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add feeds
+          if ! git diff --cached --quiet; then
+            git commit -m 'Publish unique variant IDs and validated ShopMania feed'
+            git push origin HEAD:feed-cdn
+          fi
