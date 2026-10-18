@@ -6,7 +6,7 @@ from run_catalog_sync import ensure_shopify_access_token
 app=Flask(__name__)
 PUBLIC_SHOP_URL=os.getenv('PUBLIC_SHOP_URL','https://bgshopping.net').rstrip('/')
 VAT_RATE=float(os.getenv('VAT_RATE','0.20')); REFRESH_SECONDS=int(os.getenv('REFRESH_SECONDS','14400'))
-ENABLE_CATALOG_SYNC=os.getenv('ENABLE_CATALOG_SYNC','true').lower() in ('1','true','yes','on')
+ENABLE_CATALOG_SYNC=(os.getenv('ENABLE_CATALOG_SYNC','true').lower() in ('1','true','yes','on') and os.getenv('BGSHOPPING_BULK_SYNC_APPROVED','false').lower() in ('1','true','yes','on') and os.getenv('SHOPIFY_WRITE_ENABLED','false').lower() in ('1','true','yes','on'))
 SHOPIFY_API_VERSION=os.getenv('SHOPIFY_API_VERSION','2026-10').strip()
 PAZARUVAJ_PATH='/tmp/pazaruvaj.xml'; GOOGLE_PATH='/tmp/google-shopping.xml'; AI_PATH='/tmp/ai-products.json'
 CATALOG_STATUS_PATH=os.getenv('CATALOG_SYNC_STATUS_PATH','/tmp/catalog-sync-status.json')
@@ -231,6 +231,14 @@ def loop():
             try:
                 r=run_catalog_sync(); print(json.dumps({'catalog_sync':'finished','state':(r or {}).get('state')},ensure_ascii=False),flush=True)
             except Exception as e:print(json.dumps({'catalog_sync_error':f'{type(e).__name__}: {e}'},ensure_ascii=False),flush=True)
+        else:
+            # Read supplier XML for freshness/reporting; never mutate Shopify unless approved.
+            try:
+                from supplier_worker import run as audit_supplier_feeds
+                audit=audit_supplier_feeds()
+                print(json.dumps({'supplier_audit':'finished','state':(audit or {}).get('state')},ensure_ascii=False),flush=True)
+            except Exception as e:
+                print(json.dumps({'supplier_audit_error':f'{type(e).__name__}: {e}'},ensure_ascii=False),flush=True)
         build(); time.sleep(REFRESH_SECONDS)
 def serve(path,ctype):
     if not os.path.exists(path) or os.path.getsize(path)<=1000:return Response('Feed is being generated.\n',503,content_type='text/plain; charset=utf-8',headers={'Retry-After':'60','Cache-Control':'no-store'})
