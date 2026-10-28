@@ -83,10 +83,12 @@ jobs:
         shell: bash
         env:
           SHOPIFY_FEED_TOKEN: ${{ secrets.SHOPIFY_FEED_TOKEN }}
+          SHOPIFY_CLIENT_ID: ${{ secrets.SHOPIFY_CLIENT_ID }}
+          SHOPIFY_CLIENT_SECRET: ${{ secrets.SHOPIFY_CLIENT_SECRET }}
         run: |
           set -euo pipefail
-          if [ -z "$SHOPIFY_FEED_TOKEN" ]; then
-            echo 'Shopify CDN automatic sync not yet authorized: add SHOPIFY_FEED_TOKEN repository secret with write_files and write_online_store_navigation'
+          if [ -z "$SHOPIFY_FEED_TOKEN" ] && { [ -z "$SHOPIFY_CLIENT_ID" ] || [ -z "$SHOPIFY_CLIENT_SECRET" ]; }; then
+            echo 'Shopify Files auto sync needs Dev Dashboard app credentials as SHOPIFY_CLIENT_ID and SHOPIFY_CLIENT_SECRET, or an already-existing legacy SHOPIFY_FEED_TOKEN. No live redirects changed.'
             exit 0
           fi
           python scripts/sync_shopify_cdn.py
