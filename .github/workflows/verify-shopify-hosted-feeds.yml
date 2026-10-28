@@ -1,0 +1,37 @@
+name: Verify Shopify-hosted merchant feeds
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/verify-shopify-hosted-feeds.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Verify Shopify CDN MIME types and no forced download
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS='|' read -r name kind url; do
+            test -n "$name" || continue
+            echo "BEGIN $name"
+            result=$(curl -sSIL --connect-timeout 10 --max-time 35 "$url")
+            echo "$result" | grep -Ei '^HTTP/|^content-type:|^content-disposition:|^content-length:' || true
+            echo "$result" | grep -Eq '^HTTP/2 200|^HTTP/1.1 200'
+            echo "$result" | grep -Eiq "^content-type: application/$kind"
+            if echo "$result" | grep -Eiq '^content-disposition: attachment'; then
+              echo "BAD: forced browser download"
+              exit 1
+            fi
+            echo "OK: Shopify hosted $name"
+          done <<'FILES'
+            pazaruvaj|xml|https://cdn.shopify.com/s/files/1/1044/1844/3609/files/bgshopping-pazaruvaj.xml?v=1793229935
+            shopmania|xml|https://cdn.shopify.com/s/files/1/1044/1844/3609/files/bgshopping-shopmania.xml?v=1793229952
+            google-shopping|xml|https://cdn.shopify.com/s/files/1/1044/1844/3609/files/bgshopping-google-shopping.xml?v=1793229953
+            meta-catalog|xml|https://cdn.shopify.com/s/files/1/1044/1844/3609/files/bgshopping-meta-catalog.xml?v=1793229955
+            ai-products|json|https://cdn.shopify.com/s/files/1/1044/1844/3609/files/bgshopping-ai-products.json?v=1793229954
+            feed-status|json|https://cdn.shopify.com/s/files/1/1044/1844/3609/files/bgshopping-feed-status.json?v=1793229954
+          FILES
