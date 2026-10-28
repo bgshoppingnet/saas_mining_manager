@@ -8,6 +8,8 @@ import json
 import os
 import sys
 import time
+import re
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
@@ -16,7 +18,10 @@ from urllib.request import Request, urlopen
 SHOP = "kynvva-gx.myshopify.com"
 BASE = Path(__file__).resolve().parents[1] / "feeds"
 API = f"https://{SHOP}/admin/api/2026-10/graphql.json"
-GITHUB = "https://raw.githubusercontent.com/bgshoppingnet/saas_mining_manager/feed-cdn/feeds/"
+COMMIT = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+if not re.fullmatch(r"[a-f0-9]{40}", COMMIT):
+    raise RuntimeError("Cannot resolve immutable published GitHub feed version")
+GITHUB = f"https://raw.githubusercontent.com/bgshoppingnet/saas_mining_manager/{COMMIT}/feeds/"
 CONFIG = Path(__file__).resolve().parent / "shopify-cdn-assets.json"
 TOKEN = os.environ.get("SHOPIFY_FEED_TOKEN", "").strip()
 FILES = ["pazaruvaj.xml", "shopmania.xml", "google-shopping.xml",
