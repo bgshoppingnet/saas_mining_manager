@@ -28,7 +28,7 @@ jobs:
 
       - name: Validate generator code
         run: |
-          python -m py_compile scripts/snapshot_public_shopify.py scripts/rebuild_channel_feeds.py scripts/build_meta_catalog.py
+          python -m py_compile scripts/snapshot_public_shopify.py scripts/rebuild_channel_feeds.py scripts/build_meta_catalog.py scripts/sync_shopify_cdn.py
 
       - name: Fetch current products directly from Shopify
         run: |
@@ -78,3 +78,15 @@ jobs:
           done
           echo 'Feed publish failed after safe retries'
           exit 1
+
+      - name: Sync validated exports to Shopify CDN (if secure token connected)
+        shell: bash
+        env:
+          SHOPIFY_FEED_TOKEN: ${{ secrets.SHOPIFY_FEED_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$SHOPIFY_FEED_TOKEN" ]; then
+            echo 'Shopify CDN automatic sync not yet authorized: add SHOPIFY_FEED_TOKEN repository secret with write_files and write_online_store_navigation'
+            exit 0
+          fi
+          python scripts/sync_shopify_cdn.py
