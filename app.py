@@ -8,11 +8,11 @@ PUBLIC_SHOP_URL=os.getenv('PUBLIC_SHOP_URL','https://bgshopping.net').rstrip('/'
 VAT_RATE=float(os.getenv('VAT_RATE','0.20')); REFRESH_SECONDS=int(os.getenv('REFRESH_SECONDS','14400'))
 ENABLE_CATALOG_SYNC=(os.getenv('ENABLE_CATALOG_SYNC','true').lower() in ('1','true','yes','on') and os.getenv('BGSHOPPING_BULK_SYNC_APPROVED','false').lower() in ('1','true','yes','on') and os.getenv('SHOPIFY_WRITE_ENABLED','false').lower() in ('1','true','yes','on'))
 SHOPIFY_API_VERSION=os.getenv('SHOPIFY_API_VERSION','2026-10').strip()
-PAZARUVAJ_PATH='/tmp/pazaruvaj.xml'; GOOGLE_PATH='/tmp/google-shopping.xml'; AI_PATH='/tmp/ai-products.json'
+PAZARUVAJ_PATH='/tmp/pazaruvaj.xml'; GOOGLE_PATH='/tmp/google-shopping.xml'; META_PATH='/tmp/meta-catalog.xml'; AI_PATH='/tmp/ai-products.json'
 CATALOG_STATUS_PATH=os.getenv('CATALOG_SYNC_STATUS_PATH','/tmp/catalog-sync-status.json')
 SUPPLIER_STATUS_PATH=os.getenv('SUPPLIER_STATUS_PATH','/tmp/supplier-status.json')
 SHOPIFY_STATUS_PATH=os.getenv('SHOPIFY_SYNC_STATUS_PATH','/tmp/shopify-sync-status.json')
-state={'building':False,'last_ok':None,'last_error':None,'products':0,'variants':0,'bytes':0,'pages':0,'google_items':0,'google_bytes':0,'ai_items':0,'ai_bytes':0}; lock=threading.Lock()
+state={'building':False,'last_ok':None,'last_error':None,'products':0,'variants':0,'bytes':0,'pages':0,'google_items':0,'google_bytes':0,'meta_items':0,'meta_bytes':0,'ai_items':0,'ai_bytes':0}; lock=threading.Lock()
 PRODUCTS_QUERY='''{products(query:"status:active published_status:published"){edges{node{__typename id title handle vendor productType descriptionHtml featuredImage{url} brand:metafield(namespace:"custom",key:"brand"){value} model:metafield(namespace:"custom",key:"model"){value} measurements:metafield(namespace:"custom",key:"measurements"){value} ingredients:metafield(namespace:"custom",key:"ingredients"){value} material:metafield(namespace:"custom",key:"material"){value} variants{edges{node{__typename id title sku barcode price availableForSale image{url}}}} media{edges{node{__typename status ... on MediaImage{id image{url}}}}}}}}}'''
 LABELS={'weight':'Тегло','length':'Дължина','width':'Ширина','height':'Височина','depth':'Дълбочина','diameter':'Диаметър','volume':'Обем','capacity':'Вместимост','voltage':'Напрежение','power':'Мощност','battery_capacity':'Капацитет на батерията','torque':'Въртящ момент','pressure':'Налягане','frequency':'Честота','speed':'Обороти','unit_mentions':'Технически стойности'}
 def esc(v): return html.escape(str(v or ''),quote=False)
@@ -162,7 +162,7 @@ def pazar(d):
 def google(d):
     if not d:return ''
     p=['<item>',f"<g:id>{esc(d['id'])}</g:id>",f"<title>{esc(d['title'])}</title>",f"<link>{esc(d['link'])}</link>",f"<g:availability>{'in_stock' if d['available'] else 'out_of_stock'}</g:availability>",'<g:condition>new</g:condition>',f"<g:price>{d['price']:.2f} EUR</g:price>"]
-    if d['description']:p.append(f"<description>{esc(d['description'])}</description>")
+    p.append(f"<description>{esc(d['description'] or d['title'])}</description>")
     if d['brand']:p.append(f"<g:brand>{esc(d['brand'])}</g:brand>")
     if d['product_type']:p.append(f"<g:product_type>{esc(d['product_type'])}</g:product_type>")
     if d['barcode']:p.append(f"<g:gtin>{esc(d['barcode'])}</g:gtin>")
@@ -172,6 +172,32 @@ def google(d):
         p.append(f"<g:image_link>{esc(d['images'][0])}</g:image_link>")
         for u in d['images'][1:]:p.append(f"<g:additional_image_link>{esc(u)}</g:additional_image_link>")
     p.append('</item>'); return '\n'.join(p)+'\n'
+def meta(d):
+    """Meta Commerce Manager RSS 2.0 catalog, generated only from Shopify fields."""
+    if not d or not d.get('available') or not d.get('images') or not d.get('title') or not d.get('link'):
+        return ''
+    desc=(d.get('description') or d['title'])[:5000]
+    p=['<item>',
+       f"<g:id>{esc(d['id'])}</g:id>",
+       f"<g:title>{esc(d['title'][:150])}</g:title>",
+       f"<g:description>{esc(desc)}</g:description>",
+       f"<g:link>{esc(d['link'])}</g:link>",
+       f"<g:image_link>{esc(d['images'][0])}</g:image_link>",
+       '<g:availability>in stock</g:availability>',
+       '<g:condition>new</g:condition>',
+       f"<g:price>{d['price']:.2f} EUR</g:price>"]
+    if d.get('brand'):p.append(f"<g:brand>{esc(d['brand'])}</g:brand>")
+    if d.get('barcode') and len(d['barcode']) in (8,12,13,14) and d['barcode'].isdigit():
+        p.append(f"<g:gtin>{esc(d['barcode'])}</g:gtin>")
+    if d.get('model'):p.append(f"<g:mpn>{esc(d['model'])}</g:mpn>")
+    if not d.get('brand') and not d.get('barcode') and not d.get('model'):
+        p.append('<g:identifier_exists>false</g:identifier_exists>')
+    if d.get('handle') and d.get('variant_id'):
+        p.append(f"<g:item_group_id>bgshopping-{esc(d['handle'])}</g:item_group_id>")
+    for u in d['images'][1:]:p.append(f"<g:additional_image_link>{esc(u)}</g:additional_image_link>")
+    if d.get('product_type'):p.append(f"<g:product_type>{esc(d['product_type'])}</g:product_type>")
+    p.append('</item>')
+    return '\n'.join(p)+'\n'
 def prop(n,v):
     if isinstance(v,list):v=', '.join(str(x) for x in v if str(x).strip())
     v=' '.join(str(v or '').split()); return {'@type':'PropertyValue','name':n,'value':v} if v else None
@@ -184,20 +210,22 @@ def build():
     with lock:
         if state['building']:return False
         state['building']=True; state['last_error']=None; state['pages']=0
-    tmp=[PAZARUVAJ_PATH+'.tmp',GOOGLE_PATH+'.tmp',AI_PATH+'.tmp']
+    tmp=[PAZARUVAJ_PATH+'.tmp',GOOGLE_PATH+'.tmp',AI_PATH+'.tmp',META_PATH+'.tmp']
     try:
-        auth=ensure_shopify_access_token(); s=requests.Session(); pp=pv=gi=aii=page=0; cursor=None; first=True
-        with open(tmp[0],'w',encoding='utf-8',newline='\n') as pf,open(tmp[1],'w',encoding='utf-8',newline='\n') as gf,open(tmp[2],'w',encoding='utf-8',newline='\n') as af:
-            pf.write('<?xml version="1.0" encoding="UTF-8"?>\n<products>\n'); gf.write('<?xml version="1.0" encoding="UTF-8"?>\n<rss version="2.0" xmlns:g="http://base.google.com/ns/1.0">\n<channel>\n<title>BGShopping.net Product Feed</title>\n'+f'<link>{esc(PUBLIC_SHOP_URL)}</link>\n<description>BGShopping.net product catalog for shopping channels</description>\n'); af.write('{"@context":"https://schema.org","generated_at":'+json.dumps(time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()))+',"currency":"EUR","products":[\n')
+        auth=ensure_shopify_access_token(); s=requests.Session(); pp=pv=gi=mi=aii=page=0; cursor=None; first=True
+        with open(tmp[0],'w',encoding='utf-8',newline='\n') as pf,open(tmp[1],'w',encoding='utf-8',newline='\n') as gf,open(tmp[2],'w',encoding='utf-8',newline='\n') as af,open(tmp[3],'w',encoding='utf-8',newline='\n') as mf:
+            pf.write('<?xml version="1.0" encoding="UTF-8"?>\n<products>\n'); gf.write('<?xml version="1.0" encoding="UTF-8"?>\n<rss version="2.0" xmlns:g="http://base.google.com/ns/1.0">\n<channel>\n<title>BGShopping.net Product Feed</title>\n'+f'<link>{esc(PUBLIC_SHOP_URL)}</link>\n<description>BGShopping.net product catalog for shopping channels</description>\n'); mf.write('<?xml version="1.0" encoding="UTF-8"?>\n<rss version="2.0" xmlns:g="http://base.google.com/ns/1.0">\n<channel>\n<title>BGShopping.net Meta Catalog</title>\n<link>https://bgshopping.net</link>\n<description>Own Shopify product data feed for Facebook and Instagram</description>\n'); af.write('{"@context":"https://schema.org","generated_at":'+json.dumps(time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()))+',"currency":"EUR","products":[\n')
             for scanned, p in enumerate(load_bulk_products(s), 1):
                 b=base_data(p); wrote=False
                 for v in ((p.get('variants') or {}).get('nodes') or []):
                     d=variant(b,v)
-                    if not d:continue
+                    if not d or not d['images'] or not d['title']:continue
                     z=pazar(d)
                     if z:pf.write(z); pv+=1; wrote=True
                     z=google(d)
                     if z:gf.write(z); gi+=1
+                    z=meta(d)
+                    if z:mf.write(z); mi+=1
                     z=ai(d)
                     if z:
                         if not first:af.write(',\n')
@@ -205,15 +233,16 @@ def build():
                 if wrote:pp+=1
                 page=1
                 with lock:state.update(pages=page,scanned_products=scanned,products=pp,variants=pv,google_items=gi,ai_items=aii)
-            pf.write('</products>\n'); gf.write('</channel>\n</rss>\n'); af.write('\n]}\n')
-            for f in (pf,gf,af):f.flush();os.fsync(f.fileno())
+            pf.write('</products>\n'); gf.write('</channel>\n</rss>\n'); mf.write('</channel>\n</rss>\n'); af.write('\n]}\n')
+            for f in (pf,gf,af,mf):f.flush();os.fsync(f.fileno())
         sizes=[os.path.getsize(x) for x in tmp]
         if pp<=0 or pv<=0 or sizes[0]<1000:raise RuntimeError('Pazaruvaj feed integrity failed')
         if gi<=0 or sizes[1]<1000:raise RuntimeError('Google feed integrity failed')
         if aii<=0 or sizes[2]<1000:raise RuntimeError('AI feed integrity failed')
-        for a,b in zip(tmp,[PAZARUVAJ_PATH,GOOGLE_PATH,AI_PATH]):os.replace(a,b)
-        with lock:state.update(last_ok=time.time(),products=pp,variants=pv,bytes=sizes[0],pages=page,google_items=gi,google_bytes=sizes[1],ai_items=aii,ai_bytes=sizes[2],last_error=None)
-        print(json.dumps({'feed_build':'completed','products':pp,'variants':pv,'google_items':gi,'ai_items':aii,'source':'Shopify Admin GraphQL + canonical metafields','auth_mode':(auth or {}).get('mode')},ensure_ascii=False),flush=True); return True
+        if mi<=0 or sizes[3]<1000:raise RuntimeError('Meta feed integrity failed')
+        for a,b in zip(tmp,[PAZARUVAJ_PATH,GOOGLE_PATH,AI_PATH,META_PATH]):os.replace(a,b)
+        with lock:state.update(last_ok=time.time(),products=pp,variants=pv,bytes=sizes[0],pages=page,google_items=gi,google_bytes=sizes[1],meta_items=mi,meta_bytes=sizes[3],ai_items=aii,ai_bytes=sizes[2],last_error=None)
+        print(json.dumps({'feed_build':'completed','products':pp,'variants':pv,'google_items':gi,'meta_items':mi,'ai_items':aii,'source':'Shopify Admin GraphQL + canonical metafields','auth_mode':(auth or {}).get('mode')},ensure_ascii=False),flush=True); return True
     except Exception as e:
         for x in tmp:
             try:os.remove(x)
@@ -245,13 +274,13 @@ def serve(path,ctype):
     with open(path,'rb') as f:payload=f.read()
     r=Response(payload,200,content_type=ctype);r.headers['Cache-Control']='public, max-age=900, stale-while-revalidate=3600';r.headers['Content-Length']=str(len(payload));r.add_etag();return r
 @app.get('/')
-def home():return jsonify(service='BGShopping Commerce Feeds',version='9.1',pazaruvaj='/pazaruvaj.xml',google_shopping='/google-shopping.xml',ai_products='/ai-products.json',feed_status='/feed-status',catalog_status='/catalog-status',supplier_status='/supplier-status',shopify_status='/shopify-sync-status')
+def home():return jsonify(service='BGShopping Commerce Feeds',version='9.1',pazaruvaj='/pazaruvaj.xml',google_shopping='/google-shopping.xml',meta_catalog='/meta-catalog.xml',ai_products='/ai-products.json',feed_status='/feed-status',catalog_status='/catalog-status',supplier_status='/supplier-status',shopify_status='/shopify-sync-status')
 @app.get('/health')
 def health():return jsonify(ok=True,version='9.1')
 @app.get('/feed-status')
 def feed_status():
     with lock:d=dict(state)
-    d.update(pazaruvaj_ready=os.path.exists(PAZARUVAJ_PATH) and os.path.getsize(PAZARUVAJ_PATH)>1000,google_ready=os.path.exists(GOOGLE_PATH) and os.path.getsize(GOOGLE_PATH)>1000,ai_ready=os.path.exists(AI_PATH) and os.path.getsize(AI_PATH)>1000)
+    d.update(pazaruvaj_ready=os.path.exists(PAZARUVAJ_PATH) and os.path.getsize(PAZARUVAJ_PATH)>1000,google_ready=os.path.exists(GOOGLE_PATH) and os.path.getsize(GOOGLE_PATH)>1000,meta_ready=os.path.exists(META_PATH) and os.path.getsize(META_PATH)>1000,ai_ready=os.path.exists(AI_PATH) and os.path.getsize(AI_PATH)>1000)
     if d['last_ok']:d['last_ok_iso']=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime(d['last_ok']))
     return jsonify(d)
 @app.get('/catalog-status')
@@ -264,6 +293,8 @@ def shopify_status():return jsonify(config=config(),status=read_status(SHOPIFY_S
 def pazaruvaj():return serve(PAZARUVAJ_PATH,'application/xml; charset=utf-8')
 @app.get('/google-shopping.xml')
 def google_shopping():return serve(GOOGLE_PATH,'application/xml; charset=utf-8')
+@app.get('/meta-catalog.xml')
+def meta_catalog():return serve(META_PATH,'application/xml; charset=utf-8')
 @app.get('/ai-products.json')
 def ai_products():return serve(AI_PATH,'application/ld+json; charset=utf-8')
 threading.Thread(target=loop,name='bgshopping-catalog-and-feeds',daemon=True).start()
