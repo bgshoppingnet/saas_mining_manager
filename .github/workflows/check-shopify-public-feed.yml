@@ -16,8 +16,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for url in 'https://bgshopping.net/products.json?limit=3&page=1' 'https://bgshopping.net/collections/all/products.json?limit=3&page=1'; do
-            echo "Probing Shopify public JSON"
+          for url in 'https://bgshopping.net/products.json?limit=250&page=1' 'https://bgshopping.net/products.json?limit=250&page=35' 'https://bgshopping.net/products.json?limit=250&page=75' 'https://bgshopping.net/collections/all/products.json?limit=250&page=35' 'https://bgshopping.net/collections/all/products.json?limit=250&page=75'; do
+            echo "Probing: $url"
             code=$(curl -LsS --retry 2 --max-time 35 --connect-timeout 12 -H 'Accept: application/json' -o source.json -w '%{http_code}' "$url" || true)
             echo "HTTP status: $code"
             if [ "$code" = 200 ]; then
