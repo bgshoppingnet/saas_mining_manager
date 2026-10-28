@@ -51,7 +51,7 @@ def prepare(source):
             if not row['name']:
                 raise ValueError('Missing name')
             row['image'] = images[:3]
-            row['description'] = text(row.get('description'), 1500)
+            row['description'] = text(row.get('description'), 550)
             row['offers']['price'] = format(price.quantize(Decimal('.01')), '.2f')
             brand = row.get('brand') or ''
             row['brand'] = text(brand.get('name') if isinstance(brand, dict) else brand, 150)
