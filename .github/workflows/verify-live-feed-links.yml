@@ -1,40 +1,56 @@
-name: Verify Live BGShopping Feed Links
+name: Verify Live BGShopping Shopify CDN Feeds
 on:
   push:
     branches: [main]
     paths:
       - '.github/workflows/verify-live-feed-links.yml'
+  schedule:
+    - cron: '53 */4 * * *'
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
   test-links:
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 8
     steps:
-      - name: Verify all seven branded Shopify URLs reach real files
+      - name: Verify seven branded Shopify feed URLs and inline MIME
         shell: bash
         run: |
           set -euo pipefail
-          failed=0
           for path in pazaruvaj.xml pazarovaj.xml shopmania.xml google-shopping.xml meta-catalog.xml ai-products.json feed-status.json; do
+            expected="application/xml"
+            case "$path" in *.json) expected="application/json";; esac
             good=0
-            for attempt in 1 2 3 4 5; do
-              result=$(curl -IsSL --retry 1 --max-time 45 -o /dev/null -w '%{http_code} %{url_effective}' "https://bgshopping.net/$path" || true)
+            for attempt in 1 2 3; do
+              headers=$(mktemp)
+              result=$(curl -sSLI --retry 1 --max-time 45 --connect-timeout 12 -o "$headers" -w '%{http_code} %{url_effective}' "https://bgshopping.net/$path" || true)
               echo "$path => $result"
-              case "$result" in
-                200\ https://raw.githubusercontent.com/*)
-                  good=1
-                  break
-                  ;;
-              esac
-              sleep 8
+              if [ "${result%% *}" = "200" ] && [[ "${result#* }" == https://cdn.shopify.com/* ]] && grep -qi "^content-type: $expected" "$headers" && ! grep -qi '^content-disposition: attachment' "$headers"; then
+                good=1
+              fi
+              rm -f "$headers"
+              if [ "$good" = 1 ]; then break; fi
+              sleep 5
             done
             if [ "$good" != 1 ]; then
-              echo "FAILED: $path did not resolve to a live GitHub product feed"
-              failed=1
+              echo "FAILED $path: expected real Shopify CDN with inline $expected"
+              exit 1
             fi
           done
-          curl -fsSL --max-time 35 https://bgshopping.net/feed-status.json -o feed-status.json
-          python -c 'import json; d=json.load(open("feed-status.json")); assert d["pazaruvaj_products"]>=8000 and d["google_products"]>=8000 and d["source_generated_at"].startswith("2026-10-"), d; print("VALID BGSHOPPING FEED STATUS:",d)'
-          exit "$failed"
+      - name: Verify Shopify feed status is valid and current
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL --connect-timeout 12 --max-time 40 https://bgshopping.net/feed-status.json -o /tmp/shopify-feed-status.json
+          python - <<'PY'
+          import datetime, json
+          from pathlib import Path
+          d=json.loads(Path("/tmp/shopify-feed-status.json").read_text())
+          assert d.get("currency")=="EUR"
+          assert min(d.get("pazaruvaj_products",0),d.get("google_products",0),d.get("ai_products",0),d.get("shopmania_products",0))>=8000
+          stamp=datetime.datetime.fromisoformat(d["source_generated_at"].replace("Z","+00:00"))
+          age=(datetime.datetime.now(datetime.timezone.utc)-stamp).total_seconds()
+          print("Shopify CDN feed age (hours):",round(age/3600,2),"product rows:",d.get("source_rows"))
+          assert 0<=age<=6*3600, "Shopify CDN feed is stale (>6 hours); check SHOPIFY_CLIENT_ID/SHOPIFY_CLIENT_SECRET GitHub Actions secrets"
+          PY
