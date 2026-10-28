@@ -52,3 +52,38 @@ Google & YouTube, Facebook & Instagram, Pinterest и Shop продължават
 - Публичен статус: `https://bgshopping.net/feed-status.json`
 
 Без платени услуги, без промяна на цени, складови наличности, поръчки или реклами.
+
+
+## Shopify Files CDN: преминаване без Render (29 октомври 2026 г.)
+
+**Проверено с реалните продукти:** всичките шест фийда вече са качени и READY в Shopify Files. Независим GitHub Actions тест потвърди HTTP 200, `application/xml` за XML и `application/json` за JSON, без `Content-Disposition: attachment`.
+
+| Файл | Shopify CDN име | Размер |
+|---|---|---:|
+| Pazaruvaj XML | bgshopping-pazaruvaj.xml | 16 913 121 B |
+| ShopMania XML | bgshopping-shopmania.xml | 12 917 744 B |
+| Google Shopping XML | bgshopping-google-shopping.xml | 18 002 945 B |
+| Meta XML | bgshopping-meta-catalog.xml | 18 002 946 B |
+| AI JSON | bgshopping-ai-products.json | 17 857 189 B |
+| Feed status JSON | bgshopping-feed-status.json | 256 B |
+
+Фийдовете са оптимизирани под лимита 20 MB на Shopify Files. **Същите 12 103 налични варианта**, цени и идентификатори се запазват. Съкратен е единствено текстът на описанията в експортните файлове; продуктите и описанията в Shopify не са променяни.
+
+**Важно:** докато не е настроена автоматичната авторизация за запис в Shopify, действащите адреси `bgshopping.net/*.xml` и `/ai-products.json` остават с предишния работещ GitHub източник, защото Shopify CDN файлът е статичен след качване и би остарявал. Не пренасочвайте към статичните Shopify копия без активна синхронизация.
+
+### Веднъж настроен безопасен автоматичен sync
+
+В GitHub репозитория трябва да се създаде **Actions secret** с име `SHOPIFY_FEED_TOKEN`. Токенът се издава от авторизирано Shopify приложение за магазина `kynvva-gx.myshopify.com` с Admin API права `write_files`, `read_files`, `write_online_store_navigation` и `read_online_store_navigation`. **Не записвайте токена във файлове, комити, чатове или публични URL адреси.**
+
+Тогава работният процес `.github/workflows/update-feed-cdn.yml` автоматично:
+
+1. Извлича каталога директно от Shopify и проверява всички фийдове.
+2. Обновява същите шест Shopify Files чрез `scripts/sync_shopify_cdn.py` и `fileUpdate`, без да създава дубликати.
+3. Проверява `READY`, размер и MIME на всички файлове преди промяна на който и да е линк.
+4. Използва `urlRedirectUpdate`, за да насочи 7-те познати адреса към Shopify CDN, когато **всички** файлове са готови.
+
+При липсващ `SHOPIFY_FEED_TOKEN` този последен етап се пропуска безопасно и GitHub остава действащият автоматичен източник. Не се активира платен хостинг.
+
+Автоматичното генериране чрез GitHub Actions е на всеки 4 часа; действителното време може да се отклонява при натоварване на платформата.
+
+Проверка на шестте Shopify файла: https://github.com/bgshoppingnet/saas_mining_manager/actions/workflows/verify-shopify-hosted-feeds.yml
