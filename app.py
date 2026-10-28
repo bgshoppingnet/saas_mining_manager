@@ -13,7 +13,7 @@ CATALOG_STATUS_PATH=os.getenv('CATALOG_SYNC_STATUS_PATH','/tmp/catalog-sync-stat
 SUPPLIER_STATUS_PATH=os.getenv('SUPPLIER_STATUS_PATH','/tmp/supplier-status.json')
 SHOPIFY_STATUS_PATH=os.getenv('SHOPIFY_SYNC_STATUS_PATH','/tmp/shopify-sync-status.json')
 state={'building':False,'last_ok':None,'last_error':None,'products':0,'variants':0,'bytes':0,'pages':0,'google_items':0,'google_bytes':0,'meta_items':0,'meta_bytes':0,'ai_items':0,'ai_bytes':0}; lock=threading.Lock()
-PRODUCTS_QUERY='''{products(query:"status:active published_status:published"){edges{node{__typename id title handle vendor productType descriptionHtml featuredMedia{__typename ... on MediaImage{image{url}}} brand:metafield(namespace:"custom",key:"brand"){value} model:metafield(namespace:"custom",key:"model"){value} measurements:metafield(namespace:"custom",key:"measurements"){value} ingredients:metafield(namespace:"custom",key:"ingredients"){value} material:metafield(namespace:"custom",key:"material"){value} variants{edges{node{__typename id title sku barcodes(first:1){edges{node{__typename value}}} price availableForSale media(first:1){edges{node{__typename ... on MediaImage{id image{url}}}}}}}} media{edges{node{__typename status ... on MediaImage{id image{url}}}}}}}}}'''
+PRODUCTS_QUERY='''{products(query:"status:active published_status:published"){edges{node{__typename id title handle vendor productType descriptionHtml featuredMedia{__typename ... on MediaImage{image{url}}} brand:metafield(namespace:"custom",key:"brand"){value} model:metafield(namespace:"custom",key:"model"){value} measurements:metafield(namespace:"custom",key:"measurements"){value} ingredients:metafield(namespace:"custom",key:"ingredients"){value} material:metafield(namespace:"custom",key:"material"){value} variants{edges{node{__typename id title sku barcodes(first:1){edges{node{__typename value}}} price availableForSale media(first:1){edges{node{__typename status ... on MediaImage{id image{url}}}}}}}} media{edges{node{__typename status ... on MediaImage{id image{url}}}}}}}}}'''
 LABELS={'weight':'Тегло','length':'Дължина','width':'Ширина','height':'Височина','depth':'Дълбочина','diameter':'Диаметър','volume':'Обем','capacity':'Вместимост','voltage':'Напрежение','power':'Мощност','battery_capacity':'Капацитет на батерията','torque':'Въртящ момент','pressure':'Налягане','frequency':'Честота','speed':'Обороти','unit_mentions':'Технически стойности'}
 def esc(v): return html.escape(str(v or ''),quote=False)
 def strip_html(s): return ' '.join(html.unescape(re.sub(r'<[^>]+>',' ',s or '')).split())
@@ -175,7 +175,7 @@ def pazar(d):
     p+=['<delivery_time>1</delivery_time>','</product>']; return '\n'.join(p)+'\n'
 def google(d):
     if not d:return ''
-    p=['<item>',f"<g:id>{esc(d['id'])}</g:id>",f"<title>{esc(d['title'])}</title>",f"<link>{esc(d['link'])}</link>",f"<g:availability>{'in_stock' if d['available'] else 'out_of_stock'}</g:availability>",'<g:condition>new</g:condition>',f"<g:price>{d['price']:.2f} EUR</g:price>"]
+    p=['<item>',f"<g:id>shopify-variant-{esc(d['variant_id'])}</g:id>",f"<title>{esc(d['title'])}</title>",f"<link>{esc(d['link'])}</link>",f"<g:availability>{'in_stock' if d['available'] else 'out_of_stock'}</g:availability>",'<g:condition>new</g:condition>',f"<g:price>{d['price']:.2f} EUR</g:price>"]
     p.append(f"<description>{esc(d['description'] or d['title'])}</description>")
     if d['brand']:p.append(f"<g:brand>{esc(d['brand'])}</g:brand>")
     if d['product_type']:p.append(f"<g:product_type>{esc(d['product_type'])}</g:product_type>")
@@ -192,7 +192,7 @@ def meta(d):
         return ''
     desc=(d.get('description') or d['title'])[:5000]
     p=['<item>',
-       f"<g:id>{esc(d['id'])}</g:id>",
+       f"<g:id>shopify-variant-{esc(d['variant_id'])}</g:id>",
        f"<g:title>{esc(d['title'][:150])}</g:title>",
        f"<g:description>{esc(desc)}</g:description>",
        f"<g:link>{esc(d['link'])}</g:link>",
