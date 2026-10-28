@@ -1,45 +1,54 @@
-# BGShopping.net: директни Shopify канали без Render
+# BGShopping.net: работещи XML и JSON фийдове без Render
 
-## Избран работещ модел
+## Текущо състояние (29 октомври 2026)
 
-**Shopify е единственият източник на продуктите.** За Google & YouTube, Facebook & Instagram, Pinterest и Shop се използват съществуващите нативни публикационни канали в Shopify, а не XML пренасочване към Render.
+Всички адреси по-долу са **възстановени като Shopify URL пренасочвания** към реални файлове на публичния GitHub `feed-cdn` клон.
 
-Всички изброени канали вече имат `autoPublish=true`. Това не гарантира, че всеки продукт е приеман от конкретния канал; необходима е проверка на публикацията, наличността и диагностиката на канала.
+| URL на BGShopping | Изходен файл |
+|---|---|
+| https://bgshopping.net/pazaruvaj.xml | feeds/pazaruvaj.xml |
+| https://bgshopping.net/pazarovaj.xml | feeds/pazaruvaj.xml (стар сгрешен URL) |
+| https://bgshopping.net/shopmania.xml | feeds/shopmania.xml |
+| https://bgshopping.net/google-shopping.xml | feeds/google-shopping.xml |
+| https://bgshopping.net/meta-catalog.xml | feeds/meta-catalog.xml |
+| https://bgshopping.net/ai-products.json | feeds/ai-products.json |
+| https://bgshopping.net/feed-status.json | feeds/feed-status.json |
 
-| Канал в Shopify | Publication ID | Включени продукти при проверката на 29.10.2026 г. |
-|---|---|---:|
-| Online Store | `gid://shopify/Publication/353210892633` | 20 539 |
-| Google & YouTube | `gid://shopify/Publication/353932312921` | 5 574 |
-| Facebook & Instagram | `gid://shopify/Publication/381186900313` | 20 212 |
-| Pinterest | `gid://shopify/Publication/363755241817` | 12 577 |
-| Shop | `gid://shopify/Publication/353210990937` | 5 015 |
-| POS | `gid://shopify/Publication/353210958169` | 12 625 |
-| BGShopping Headless | `gid://shopify/Publication/366144946521` | 13 253 |
-| Inbox | `gid://shopify/Publication/375451418969` | 20 275 |
+Външна проверка през GitHub Actions `Verify Live BGShopping Feed Links` потвърди **HTTP 200 и правилна GitHub цел за всички 7 URL** на 29 октомври 2026 г. Последният валидиран каталог е генериран в 2026-10-28T23:06:26Z (01:06:26 ч. българско време), със следните резултати:
 
-Числата са Shopify includedProductsCount, не гарантирано одобрени или показвани продукти във външните платформи.
+- **12 103 налични продуктови варианта** с реална EUR цена и снимка
+- Pazaruvaj: 12 103 XML записа
+- Google Shopping: 12 103 XML записа
+- AI JSON: 12 103 JSON-LD продукта
+- Meta XML: 12 103 записа
+- ShopMania: 10 000 записа (ограничение в съществуващия адаптер)
+- Shopify има общо 24 156 продукта, но фийдовете умишлено не включват неналични артикули или артикули без реална цена/снимка.
 
-## Направено
+## Автоматично обновяване
 
-- Изтрити са всички пет Shopify URL пренасочвания към `bgshopping-feed-cdn.onrender.com`: `/pazaruvaj.xml`, `/google-shopping.xml`, `/ai-products.json`, `/shopmania.xml`, `/pazarovaj.xml`.
-- Shopify е потвърдил **762** останали пренасочвания след премахването.
-- Публикувани директно в Google & YouTube **72 подходящи активни продукта**.
-- Публикувани директно в Shop **73 подходящи активни продукта**.
-- Публикувани директно в Pinterest **2 подходящи активни продукта**.
-- За продуктите е проверено: активен статус, онлайн URL, положителна цена на наличен вариант, изображение и наличност; за новата извадка се изисква поне 5 броя.
-- Не са променяни цени, складови количества, SEO тема, реклами или продукти.
-- Отчетените промени са проверени с повторен Shopify API прочит.
+GitHub Actions работен процес `.github/workflows/update-feed-cdn.yml` на `main`:
+
+- Стартира по график `17 */4 * * *` (веднъж на 4 часа), както и ръчно.
+- Изтегля директно актуалния публичен продуктов JSON от `https://bgshopping.net/products.json`, с пълна страницация и проверки за цялост.
+- Генерира файловете в публичния клон `feed-cdn` с `scripts/snapshot_public_shopify.py`, `scripts/rebuild_channel_feeds.py` и `scripts/build_meta_catalog.py`.
+- Проверява XML парсването, актуалността, минималния брой артикули и наличието на изображения, преди публикуване.
+- Ако Shopify е недостъпен или изтеглянето е непълно, **не подменя** последния проверен каталог.
+- Не използва Render, Shopify Admin токен, платена услуга или запис по продуктите.
+
+Графикът на GitHub Actions е с възможни закъснения. Действителната актуалност винаги се вижда в `/feed-status.json` и `feeds/last-updated.txt`.
+
+## Нативните Shopify канали остават отделни
+
+Google & YouTube, Facebook & Instagram, Pinterest и Shop продължават да получават продукти по съществуващата директна интеграция на Shopify. Тези XML адреси **не се добавят като втори активен източник автоматично** и не гарантират одобрение от външна платформа. Не добавяйте дублиращи фийдове за същите артикули, без да проверите настройките на съответния Merchant/Commerce акаунт.
 
 ## Render
 
-Двата Render проекта `bgshopping-pazaruvaj-feed` и `bgshopping-feed-cdn` са **suspended (billing)**. Shopify вече не използва изтритите пет пренасочвания. През наличната Render връзка няма инструмент за изтриване на самите Render услуги, така че техният статус остава спрян, а не окончателно премахнат от акаунта. Не активирайте платени планове.
+Двата стари Render проекта са спрени. Shopify **няма пренасочвания към Render**. Старият `refresh-feeds-after-generator-update.yml`, който зависеше от Render, е изтрит от `main`. Наличният Render конектор не предлага изтриване на услуги; окончателно изтриване от Render акаунта трябва да се направи там, ако е необходимо.
 
-## Пазим XML генератора само като архивен код
+## Проверка
 
-В `app.py` остава самостоятелният XML генератор за Google, Meta, Pazaruvaj и AI. Той **не е нужен** за текущата пряка синхронизация и не е свързан към Shopify URL пренасочвания. Не го активирайте, преди да има изрична нужда и работеща инфраструктура.
+- Публичен URL тест: `https://github.com/bgshoppingnet/saas_mining_manager/actions/workflows/verify-live-feed-links.yml`
+- Генериране на фийдовете: `https://github.com/bgshoppingnet/saas_mining_manager/actions/workflows/update-feed-cdn.yml`
+- Публичен статус: `https://bgshopping.net/feed-status.json`
 
-**Pazaruvaj и ShopMania не са сред наличните Shopify публикационни канали**. Те не са заместени от Pinterest/Shop; за тях е нужна отделна допустима интеграция, ако ще се използват.
-
-## Наблюдение
-
-Проверявайте в Shopify → Sales channels → Google & YouTube, Facebook & Instagram, Pinterest и Shop броя публикувани продукти, диагностиката, отказите по политика, коректните EUR цени, снимките и наличността. Не създавайте дублиращи scheduled feeds, ако каналът вече получава продуктите от Shopify.
+Без платени услуги, без промяна на цени, складови наличности, поръчки или реклами.
