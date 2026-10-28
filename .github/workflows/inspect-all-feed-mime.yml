@@ -1,0 +1,30 @@
+name: Inspect all Shopify feed file types
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/inspect-all-feed-mime.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    steps:
+      - name: Check actual file headers through branded URLs
+        shell: bash
+        run: |
+          set -euo pipefail
+          for item in pazaruvaj.xml pazarovaj.xml shopmania.xml google-shopping.xml meta-catalog.xml ai-products.json feed-status.json; do
+            echo "===== MAIN $item ====="
+            curl -sSLI --connect-timeout 12 --max-time 40 "https://bgshopping.net/$item" | grep -Ei '^HTTP/|^content-type:|^content-disposition:|^content-length:|^location:|^x-content-type-options:' || true
+          done
+      - name: Compare content-type of alternative public CDN serving
+        shell: bash
+        run: |
+          set -euo pipefail
+          for item in pazaruvaj.xml shopmania.xml google-shopping.xml meta-catalog.xml ai-products.json feed-status.json; do
+            echo "===== JSDELIVR $item ====="
+            curl -sSLI --connect-timeout 12 --max-time 35 "https://cdn.jsdelivr.net/gh/bgshoppingnet/saas_mining_manager@feed-cdn/feeds/$item" | grep -Ei '^HTTP/|^content-type:|^content-disposition:|^content-length:|^location:' || true
+          done
