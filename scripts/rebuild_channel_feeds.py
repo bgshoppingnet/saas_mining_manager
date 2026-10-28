@@ -67,7 +67,7 @@ def add(parent, tag, value):
 
 
 def write_xml(path, root):
-    ET.indent(root)
+    # Compact output keeps full catalog within Shopify Files 20 MB limit.
     ET.ElementTree(root).write(path, encoding='utf-8', xml_declaration=True)
 
 
