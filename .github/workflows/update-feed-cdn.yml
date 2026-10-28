@@ -45,6 +45,11 @@ jobs:
           python -c 'import json,datetime,pathlib,xml.etree.ElementTree as E; p=pathlib.Path("feeds"); s=json.loads((p/"feed-status.json").read_text()); t=datetime.datetime.fromisoformat(s["source_generated_at"].replace("Z","+00:00")); assert (datetime.datetime.now(datetime.timezone.utc)-t).total_seconds()<1800, "Stale source"; assert s["source_rows"]>=8000 and s["pazaruvaj_products"]>=8000, s; assert s["google_products"]>=8000 and s["shopmania_products"]>=8000, s; [E.parse(p/f) for f in ("pazaruvaj.xml","google-shopping.xml","shopmania.xml","meta-catalog.xml")]; assert len(json.loads((p/"ai-products.json").read_text())["products"])>=8000; print("ALL FIVE FEEDS VALID",s)'
           date -u +'%Y-%m-%dT%H:%M:%SZ' > feeds/last-updated.txt
 
+      - name: Report Shopify Files size eligibility
+        shell: bash
+        run: |
+          python -c 'from pathlib import Path; p=Path("feeds"); names=["pazaruvaj.xml","shopmania.xml","google-shopping.xml","meta-catalog.xml","ai-products.json","feed-status.json"]; print("SHOPIFY_CDN_SIZE_CHECK",[(n,(p/n).stat().st_size,(p/n).stat().st_size<19000000) for n in names],flush=True)'
+
       - name: Publish only fully validated feeds to GitHub (no Render)
         shell: bash
         run: |
