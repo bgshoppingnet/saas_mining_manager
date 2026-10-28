@@ -1,8 +1,9 @@
 """Publish already validated XML/JSON exports to Shopify Files, never Render.
 
 Run only after the Github feed snapshot is validated and committed. Requires a
-merchant-authorized SHOPIFY_FEED_TOKEN in GitHub Actions Secrets with write_files
-and write_online_store_navigation. Never log tokens or store them in repository.
+merchant-authorized existing SHOPIFY_FEED_TOKEN or a Dev Dashboard app using
+SHOPIFY_CLIENT_ID and SHOPIFY_CLIENT_SECRET in GitHub Actions Secrets.
+Never log tokens or store them in repository.
 """
 import json
 import os
@@ -24,6 +25,9 @@ if not re.fullmatch(r"[a-f0-9]{40}", COMMIT):
 GITHUB = f"https://raw.githubusercontent.com/bgshoppingnet/saas_mining_manager/{COMMIT}/feeds/"
 CONFIG = Path(__file__).resolve().parent / "shopify-cdn-assets.json"
 TOKEN = os.environ.get("SHOPIFY_FEED_TOKEN", "").strip()
+CLIENT_ID = os.environ.get("SHOPIFY_CLIENT_ID", "").strip()
+CLIENT_SECRET = os.environ.get("SHOPIFY_CLIENT_SECRET", "").strip()
+CACHED_TOKEN = None
 FILES = ["pazaruvaj.xml", "shopmania.xml", "google-shopping.xml",
          "meta-catalog.xml", "ai-products.json", "feed-status.json"]
 REDIRECTS = {
@@ -37,11 +41,38 @@ REDIRECTS = {
 }
 MIMES = {".xml": "application/xml", ".json": "application/json"}
 
+def get_access_token():
+    """Existing admin-created app token, or current 2026 Dev Dashboard client grant."""
+    global CACHED_TOKEN
+    if CACHED_TOKEN:
+        return CACHED_TOKEN
+    if TOKEN:
+        CACHED_TOKEN = TOKEN
+        return CACHED_TOKEN
+    if not (CLIENT_ID and CLIENT_SECRET):
+        raise RuntimeError("Missing Shopify authentication: configure existing SHOPIFY_FEED_TOKEN or both SHOPIFY_CLIENT_ID and SHOPIFY_CLIENT_SECRET")
+    body = urlencode({"grant_type": "client_credentials", "client_id": CLIENT_ID,
+                      "client_secret": CLIENT_SECRET}).encode("ascii")
+    req = Request(f"https://{SHOP}/admin/oauth/access_token", data=body, method="POST",
+                  headers={"Content-Type": "application/x-www-form-urlencoded"})
+    with urlopen(req, timeout=40) as response:
+        data = json.load(response)
+    scopes = {v.strip() for v in str(data.get("scope") or "").split(",") if v.strip()}
+    required = {"write_files", "write_online_store_navigation"}
+    missing = required - scopes
+    if missing:
+        raise RuntimeError("Shopify app missing required scopes: " + ",".join(sorted(missing)))
+    token = data.get("access_token")
+    if not isinstance(token, str) or not token:
+        raise RuntimeError("Shopify client credentials did not return an access token")
+    CACHED_TOKEN = token
+    return CACHED_TOKEN
+
 def gql(query, variables):
     payload = json.dumps({"query": query, "variables": variables}).encode("utf-8")
     req = Request(API, data=payload, method="POST", headers={
         "Content-Type": "application/json",
-        "X-Shopify-Access-Token": TOKEN,
+        "X-Shopify-Access-Token": get_access_token(),
         "User-Agent": "BGShopping-Own-Shopify-Feeds/1.0"
     })
     with urlopen(req, timeout=95) as response:
@@ -98,11 +129,11 @@ def inspect_shopify_file(file):
     return True
 
 def main():
-    if not TOKEN:
-        raise RuntimeError("SHOPIFY_FEED_TOKEN secret missing")
+    get_access_token()
     report = verified_source()
     ids, redirect_ids = load_config()
     prior = get_files(ids.values())
+    prior_urls = {name: prior[id].get("url") if id in prior else None for name, id in ids.items()}
     if len(prior) != len(FILES):
         raise RuntimeError("Some Shopify CDN files are missing")
     for name,id in ids.items():
@@ -132,6 +163,7 @@ def main():
         complete = all(
             f_id in files and inspect_shopify_file(files[f_id]) and
             files[f_id].get("originalFileSize") == expected[name] and
+            files[f_id].get("url") != prior_urls[name] and
             files[f_id].get("mimeType") == MIMES[Path(name).suffix]
             for name, f_id in ids.items()
         )
