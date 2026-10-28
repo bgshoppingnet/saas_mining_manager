@@ -13,7 +13,7 @@ CATALOG_STATUS_PATH=os.getenv('CATALOG_SYNC_STATUS_PATH','/tmp/catalog-sync-stat
 SUPPLIER_STATUS_PATH=os.getenv('SUPPLIER_STATUS_PATH','/tmp/supplier-status.json')
 SHOPIFY_STATUS_PATH=os.getenv('SHOPIFY_SYNC_STATUS_PATH','/tmp/shopify-sync-status.json')
 state={'building':False,'last_ok':None,'last_error':None,'products':0,'variants':0,'bytes':0,'pages':0,'google_items':0,'google_bytes':0,'meta_items':0,'meta_bytes':0,'ai_items':0,'ai_bytes':0}; lock=threading.Lock()
-PRODUCTS_QUERY='''{products(query:"status:active published_status:published"){edges{node{__typename id title handle vendor productType descriptionHtml featuredImage{url} brand:metafield(namespace:"custom",key:"brand"){value} model:metafield(namespace:"custom",key:"model"){value} measurements:metafield(namespace:"custom",key:"measurements"){value} ingredients:metafield(namespace:"custom",key:"ingredients"){value} material:metafield(namespace:"custom",key:"material"){value} variants{edges{node{__typename id title sku barcode price availableForSale image{url}}}} media{edges{node{__typename status ... on MediaImage{id image{url}}}}}}}}}'''
+PRODUCTS_QUERY='''{products(query:"status:active published_status:published"){edges{node{__typename id title handle vendor productType descriptionHtml featuredMedia{__typename ... on MediaImage{image{url}}} brand:metafield(namespace:"custom",key:"brand"){value} model:metafield(namespace:"custom",key:"model"){value} measurements:metafield(namespace:"custom",key:"measurements"){value} ingredients:metafield(namespace:"custom",key:"ingredients"){value} material:metafield(namespace:"custom",key:"material"){value} variants{edges{node{__typename id title sku barcodes(first:1){edges{node{__typename value}}} price availableForSale media(first:1){edges{node{__typename ... on MediaImage{id image{url}}}}}}}} media{edges{node{__typename status ... on MediaImage{id image{url}}}}}}}}}'''
 LABELS={'weight':'Тегло','length':'Дължина','width':'Ширина','height':'Височина','depth':'Дълбочина','diameter':'Диаметър','volume':'Обем','capacity':'Вместимост','voltage':'Напрежение','power':'Мощност','battery_capacity':'Капацитет на батерията','torque':'Въртящ момент','pressure':'Налягане','frequency':'Честота','speed':'Обороти','unit_mentions':'Технически стойности'}
 def esc(v): return html.escape(str(v or ''),quote=False)
 def strip_html(s): return ' '.join(html.unescape(re.sub(r'<[^>]+>',' ',s or '')).split())
@@ -91,7 +91,7 @@ def load_bulk_products(session):
         raise RuntimeError('Feed export timed out')
     if not operation.get('url'):
         raise RuntimeError('Completed feed export has no download URL')
-    products, variants, images = {}, {}, {}
+    products, variants, images, barcodes, variant_images = {}, {}, {}, {}, {}
     with session.get(operation['url'], timeout=(20, 180), stream=True) as response:
         response.raise_for_status()
         response.encoding = 'utf-8'
@@ -104,12 +104,26 @@ def load_bulk_products(session):
                 products[row['id']] = row
             elif kind == 'ProductVariant' and parent:
                 variants.setdefault(parent, []).append(row)
+            elif kind == 'ProductVariantBarcode' and parent:
+                barcode = str(row.get('value') or '').strip()
+                if barcode:
+                    barcodes.setdefault(parent, []).append(barcode)
             elif kind == 'MediaImage' and parent and row.get('status') == 'READY':
                 url = (row.get('image') or {}).get('url')
                 if url:
-                    images.setdefault(parent, []).append({'url': url})
+                    if str(parent).startswith('gid://shopify/ProductVariant/'):
+                        variant_images.setdefault(parent, []).append({'url': url})
+                    else:
+                        images.setdefault(parent, []).append({'url': url})
     for product_id, product in products.items():
-        product['variants'] = {'nodes': variants.get(product_id, [])}
+        product_variants = variants.get(product_id, [])
+        for variant_node in product_variants:
+            variant_id = variant_node.get('id')
+            if barcodes.get(variant_id):
+                variant_node['barcode'] = barcodes[variant_id][0]
+            if variant_images.get(variant_id):
+                variant_node['image'] = variant_images[variant_id][0]
+        product['variants'] = {'nodes': product_variants}
         product['images'] = {'nodes': images.get(product_id, [])}
         yield product
 
@@ -121,7 +135,7 @@ def base_data(p):
     for x in ((p.get('images') or {}).get('nodes') or [])[:3]:
         u=((x or {}).get('url') or '').strip()
         if u and u not in imgs:imgs.append(u)
-    f=((p.get('featuredImage') or {}).get('url') or '').strip()
+    f=(((p.get('featuredMedia') or {}).get('image') or {}).get('url') or '').strip()
     if f:imgs=[f]+[u for u in imgs if u!=f]
     return {'handle':h,'brand':canonical_brand(mf(p,'brand') or (p.get('vendor') or '').strip()),'model':mf(p,'model'),'measurements':measures(mf(p,'measurements')),'ingredients':mf(p,'ingredients'),'material':mf(p,'material'),'product_type':(p.get('productType') or '').strip(),'description':strip_html(p.get('descriptionHtml') or ''),'title':(p.get('title') or '').strip(),'images':imgs[:3]}
 def variant(base,v):
