@@ -1,0 +1,37 @@
+name: Check Shopify public product feed source
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/check-shopify-public-feed.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Read products directly from Shopify, without Render
+        shell: bash
+        run: |
+          set -euo pipefail
+          for url in 'https://bgshopping.net/products.json?limit=3&page=1' 'https://bgshopping.net/collections/all/products.json?limit=3&page=1'; do
+            echo "Probing Shopify path: ${url%%\?*}"
+            code=$(curl -LsS --retry 2 --max-time 35 --connect-timeout 12 -H 'Accept: application/json' -A 'BGShopping-Direct-Feed-Check/1.0' -o source.json -w '%{http_code}' "$url" || true)
+            echo "HTTP status: $code"
+            if [ "$code" = 200 ]; then
+              python - <<'PY'
+import json
+try:
+  value=json.load(open('source.json', encoding='utf-8'))
+  items=value.get('products', []) if isinstance(value,dict) else []
+  if items:
+    first=items[0]
+    variant=(first.get('variants') or [{}])[0]
+    print('VALID_SOURCE: product_count=',len(items),'has_handle=',bool(first.get('handle')),'has_variants=',bool(first.get('variants')),'price_type=',type(variant.get('price')).__name__,'has_image=',bool(first.get('images')))
+  else: print('SOURCE_HAS_NO_PRODUCTS')
+except Exception as e: print('SOURCE_NOT_VALID_JSON', type(e).__name__, str(e)[:100])
+PY
+            fi
+          done
