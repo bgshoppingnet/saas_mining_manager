@@ -1,0 +1,40 @@
+name: Verify Live BGShopping Feed Links
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/verify-live-feed-links.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test-links:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Verify all seven branded Shopify URLs reach real files
+        shell: bash
+        run: |
+          set -euo pipefail
+          failed=0
+          for path in pazaruvaj.xml pazarovaj.xml shopmania.xml google-shopping.xml meta-catalog.xml ai-products.json feed-status.json; do
+            good=0
+            for attempt in 1 2 3 4 5; do
+              result=$(curl -IsSL --retry 1 --max-time 45 -o /dev/null -w '%{http_code} %{url_effective}' "https://bgshopping.net/$path" || true)
+              echo "$path => $result"
+              case "$result" in
+                200\ https://raw.githubusercontent.com/*)
+                  good=1
+                  break
+                  ;;
+              esac
+              sleep 8
+            done
+            if [ "$good" != 1 ]; then
+              echo "FAILED: $path did not resolve to a live GitHub product feed"
+              failed=1
+            fi
+          done
+          curl -fsSL --max-time 35 https://bgshopping.net/feed-status.json -o feed-status.json
+          python -c 'import json; d=json.load(open("feed-status.json")); assert d["pazaruvaj_products"]>=8000 and d["google_products"]>=8000 and d["source_generated_at"].startswith("2026-10-"), d; print("VALID BGSHOPPING FEED STATUS:",d)'
+          exit "$failed"
