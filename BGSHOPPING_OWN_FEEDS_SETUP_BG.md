@@ -1,43 +1,45 @@
-# BGShopping.net: собствен каталог за Google, Meta, Pazaruvaj и AI
+# BGShopping.net: директни Shopify канали без Render
 
-Източник на продуктовите данни: **Shopify Admin GraphQL** (не са фийдове на доставчици).
+## Избран работещ модел
 
-## Подготвени публични маршрути
+**Shopify е единственият източник на продуктите.** За Google & YouTube, Facebook & Instagram, Pinterest и Shop се използват съществуващите нативни публикационни канали в Shopify, а не XML пренасочване към Render.
 
-Планиран основен сървър: `https://bgshopping-pazaruvaj-feed.onrender.com`
+Всички изброени канали вече имат `autoPublish=true`. Това не гарантира, че всеки продукт е приеман от конкретния канал; необходима е проверка на публикацията, наличността и диагностиката на канала.
 
-| Канал | Път | Формат |
-|---|---|---|
-| Google Merchant Center | `/google-shopping.xml` | RSS 2.0, Google `g:` namespace |
-| Facebook / Instagram (Meta Commerce Manager) | `/meta-catalog.xml` | RSS 2.0, Google `g:` namespace |
-| Pazaruvaj | `/pazaruvaj.xml` | XML според наличния адаптер |
-| Индексиране и AI | `/ai-products.json` | JSON-LD |
-| Наблюдение | `/feed-status` | JSON |
+| Канал в Shopify | Publication ID | Включени продукти при проверката на 29.10.2026 г. |
+|---|---|---:|
+| Online Store | `gid://shopify/Publication/353210892633` | 20 539 |
+| Google & YouTube | `gid://shopify/Publication/353932312921` | 5 574 |
+| Facebook & Instagram | `gid://shopify/Publication/381186900313` | 20 212 |
+| Pinterest | `gid://shopify/Publication/363755241817` | 12 577 |
+| Shop | `gid://shopify/Publication/353210990937` | 5 015 |
+| POS | `gid://shopify/Publication/353210958169` | 12 625 |
+| BGShopping Headless | `gid://shopify/Publication/366144946521` | 13 253 |
+| Inbox | `gid://shopify/Publication/375451418969` | 20 275 |
 
-## Правила
+Числата са Shopify includedProductsCount, не гарантирано одобрени или показвани продукти във външните платформи.
 
-- Собствен източник: текущите активни и публикувани продукти от Shopify.
-- Продажна цена от Shopify в **EUR**, без изкуствено намаляване и без смяна на цените в магазина.
-- Само артикули с положителна цена, име и поне една снимка.
-- Google: наличността се описва като `in_stock` или `out_of_stock`.
-- Meta: само варианти с `availableForSale=true`.
-- Идентификатори за Google и Meta: `shopify-variant-<variant_id>`, стабилни и уникални.
-- Баркодове и снимки на варианти се четат от актуалните GraphQL полета `barcodes` и `media`.
-- Опресняване: `REFRESH_SECONDS=14400` (4 часа) **само когато процесът работи**.
-- Съществуващата синхронизация към Shopify остава изключена без изричните флагове за разрешение на запис; фийдовете само четат.
-- Не се пипат поръчки, продукти, складове или реклама.
+## Направено
 
-## Проверка
+- Изтрити са всички пет Shopify URL пренасочвания към `bgshopping-feed-cdn.onrender.com`: `/pazaruvaj.xml`, `/google-shopping.xml`, `/ai-products.json`, `/shopmania.xml`, `/pazarovaj.xml`.
+- Shopify е потвърдил **762** останали пренасочвания след премахването.
+- Публикувани директно в Google & YouTube **72 подходящи активни продукта**.
+- Публикувани директно в Shop **73 подходящи активни продукта**.
+- Публикувани директно в Pinterest **2 подходящи активни продукта**.
+- За продуктите е проверено: активен статус, онлайн URL, положителна цена на наличен вариант, изображение и наличност; за новата извадка се изисква поне 5 броя.
+- Не са променяни цени, складови количества, SEO тема, реклами или продукти.
+- Отчетените промени са проверени с повторен Shopify API прочит.
 
-Първо потвърдете, че `/health` дава HTTP 200 и `/feed-status` показва `google_ready=true`, `meta_ready=true`, `pazaruvaj_ready=true`, `last_error=null`. След това XML трябва да е с HTTP 200 и `Content-Type: application/xml`, RSS корен, артикули и реални снимки/цени.
+## Render
 
-След включване на работещ хостинг:
-1. В **Google Merchant Center → Data sources** добавете `/google-shopping.xml` като основен планиран източник за България, EUR. Не добавяйте втори паралелен източник със същите артикули, докато Google & YouTube вече ги поддържа.
-2. В **Meta Commerce Manager → Catalog → Data sources** добавете `/meta-catalog.xml` като scheduled feed за правилния каталог. Ако Shopify Facebook & Instagram вече синхронизира същите артикули, преминете към един източник контролирано, без създаване на дубликати.
-3. Проверете **Diagnostics**, действителните публикувани артикули и часовата отметка на последното обновяване.
+Двата Render проекта `bgshopping-pazaruvaj-feed` и `bgshopping-feed-cdn` са **suspended (billing)**. Shopify вече не използва изтритите пет пренасочвания. През наличната Render връзка няма инструмент за изтриване на самите Render услуги, така че техният статус остава спрян, а не окончателно премахнат от акаунта. Не активирайте платени планове.
 
-## Блокиращо условие към 29.10.2026 г.
+## Пазим XML генератора само като архивен код
 
-Render услугите `bgshopping-pazaruvaj-feed` и `bgshopping-feed-cdn` са **suspended (billing)**. Публичните фийдове НЕ са потвърдени като работещи. Измененията са в GitHub `bgshoppingnet/saas_mining_manager`, клон `main`, но това не разрешава billing спирането. Няма разрешение за включване на платени услуги.
+В `app.py` остава самостоятелният XML генератор за Google, Meta, Pazaruvaj и AI. Той **не е нужен** за текущата пряка синхронизация и не е свързан към Shopify URL пренасочвания. Не го активирайте, преди да има изрична нужда и работеща инфраструктура.
 
-Администраторски токени, подписани експорти и секрети **не трябва** да се добавят в GitHub. Няма разрешение за автоматично активиране на платени кампании.
+**Pazaruvaj и ShopMania не са сред наличните Shopify публикационни канали**. Те не са заместени от Pinterest/Shop; за тях е нужна отделна допустима интеграция, ако ще се използват.
+
+## Наблюдение
+
+Проверявайте в Shopify → Sales channels → Google & YouTube, Facebook & Instagram, Pinterest и Shop броя публикувани продукти, диагностиката, отказите по политика, коректните EUR цени, снимките и наличността. Не създавайте дублиращи scheduled feeds, ако каналът вече получава продуктите от Shopify.
