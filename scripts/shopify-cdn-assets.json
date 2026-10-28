@@ -1,0 +1,20 @@
+{
+  "comment": "Public resource IDs only. Do not store Shopify API credentials here.",
+  "files": {
+    "pazaruvaj.xml": "gid://shopify/GenericFile/76944569237849",
+    "shopmania.xml": "gid://shopify/GenericFile/76944571203929",
+    "google-shopping.xml": "gid://shopify/GenericFile/76944571236697",
+    "meta-catalog.xml": "gid://shopify/GenericFile/76944571892057",
+    "ai-products.json": "gid://shopify/GenericFile/76944571924825",
+    "feed-status.json": "gid://shopify/GenericFile/76944571990361"
+  },
+  "redirects": {
+    "/pazaruvaj.xml": "gid://shopify/UrlRedirect/1838967030105",
+    "/pazarovaj.xml": "gid://shopify/UrlRedirect/1838967325017",
+    "/shopmania.xml": "gid://shopify/UrlRedirect/1838967095641",
+    "/google-shopping.xml": "gid://shopify/UrlRedirect/1838967062873",
+    "/meta-catalog.xml": "gid://shopify/UrlRedirect/1838967226713",
+    "/ai-products.json": "gid://shopify/UrlRedirect/1838967161177",
+    "/feed-status.json": "gid://shopify/UrlRedirect/1838967259481"
+  }
+}
