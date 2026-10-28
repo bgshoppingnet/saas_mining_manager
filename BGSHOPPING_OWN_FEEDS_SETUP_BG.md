@@ -73,7 +73,9 @@ Google & YouTube, Facebook & Instagram, Pinterest и Shop продължават
 
 ### Веднъж настроен безопасен автоматичен sync
 
-В GitHub репозитория трябва да се създаде **Actions secret** с име `SHOPIFY_FEED_TOKEN`. Токенът се издава от авторизирано Shopify приложение за магазина `kynvva-gx.myshopify.com` с Admin API права `write_files`, `read_files`, `write_online_store_navigation` и `read_online_store_navigation`. **Не записвайте токена във файлове, комити, чатове или публични URL адреси.**
+**Препоръчителен метод за ново приложение през 2026 г.:** Shopify Dev Dashboard (`https://dev.shopify.com/dashboard`) → Apps → създаване на приложение → API access scopes `write_files` и `write_online_store_navigation` (съответните права за четене са включени) → Release → Install за магазина `kynvva-gx.myshopify.com`. Приложението и магазинът трябва да са в **една Shopify организация**, за да работи client-credentials grant. В Dev Dashboard → App → Settings вземете Client ID и Client secret; запишете ги **само** като GitHub Actions repository secrets `SHOPIFY_CLIENT_ID` и `SHOPIFY_CLIENT_SECRET` през `https://github.com/bgshoppingnet/saas_mining_manager/settings/secrets/actions`. Никога не ги поставяйте в чат, файлове, git комити или публични URL адреси. Софтуерът извлича краткоживеещ Admin API токен при изпълнение; няма нужда ръчно да се сменя на 24 ч. Ако има вече инсталирано старо admin-created приложение с валиден offline токен, поддържа се и `SHOPIFY_FEED_TOKEN`, но **нови admin-created custom apps вече не могат да се създават**.
+
+Външна документация: https://shopify.dev/docs/apps/build/authentication-authorization/client-credentials-grant и https://shopify.dev/docs/apps/build/authentication-authorization/legacy/admin-custom-apps.
 
 Тогава работният процес `.github/workflows/update-feed-cdn.yml` автоматично:
 
@@ -87,3 +89,7 @@ Google & YouTube, Facebook & Instagram, Pinterest и Shop продължават
 Автоматичното генериране чрез GitHub Actions е на всеки 4 часа; действителното време може да се отклонява при натоварване на платформата.
 
 Проверка на шестте Shopify файла: https://github.com/bgshoppingnet/saas_mining_manager/actions/workflows/verify-shopify-hosted-feeds.yml
+
+### Състояние към 29 октомври 2026, 01:35 (Europe/Sofia)
+
+Шестте компактни файла са в Shopify CDN със съответния MIME и размер, но `SHOPIFY_CLIENT_ID` и `SHOPIFY_CLIENT_SECRET` не са конфигурирани в GitHub Actions към последната проверка. Поради тази липса **7-те работещи branded redirects остават временно към GitHub**. Автоматичното им преминаване към Shopify се извършва от `scripts/sync_shopify_cdn.py` само след валидирано качване на всичките шест файла и активна авторизация. Планът за автоматизация през ChatGPT е блокиран от лимита за активни задачи; не са спирани други автоматизации.
