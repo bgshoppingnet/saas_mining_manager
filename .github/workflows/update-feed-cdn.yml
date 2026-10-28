@@ -1,6 +1,4 @@
-# Refresh after complete published-catalog export and exact-stock safeguards, 2026-10-13
-name: Update Feed CDN
-
+name: Update Feed CDN Direct Shopify
 on:
   push:
     branches: [main]
@@ -13,148 +11,49 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: bgshopping-public-feeds
+  cancel-in-progress: false
+
 jobs:
   refresh-feeds:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
     steps:
-      - name: Checkout feed-cdn branch
+      - name: Checkout the public feed storage branch
         uses: actions/checkout@v4
         with:
           ref: feed-cdn
+          fetch-depth: 0
 
-      - name: Fetch latest feeds from generator
-        shell: bash
+      - name: Validate generator code
         run: |
-          set -euo pipefail
-          mkdir -p feeds tmp-feeds
+          python -m py_compile scripts/snapshot_public_shopify.py scripts/rebuild_channel_feeds.py scripts/build_meta_catalog.py
 
-          fetch_with_retry() {
-            url="$1"
-            out="$2"
-            for i in $(seq 1 90); do
-              code=$(curl -L -sS -o "$out.tmp" -w '%{http_code}' --max-time 120 "$url" || true)
-              if [ "$code" = "200" ] && [ -s "$out.tmp" ]; then
-                mv "$out.tmp" "$out"
-                return 0
-              fi
-              rm -f "$out.tmp"
-              echo "Attempt $i for $url returned HTTP $code; retrying in 10s"
-              sleep 10
-            done
-            echo "Failed to fetch $url after retries" >&2
-            return 1
-          }
-
-          fetch_with_retry "https://bgshopping-pazaruvaj-feed.onrender.com/pazaruvaj.xml" "tmp-feeds/pazaruvaj.xml"
-          fetch_with_retry "https://bgshopping-pazaruvaj-feed.onrender.com/google-shopping.xml" "tmp-feeds/google-shopping.xml"
-          fetch_with_retry "https://bgshopping-pazaruvaj-feed.onrender.com/ai-products.json" "tmp-feeds/ai-products.json"
-
-      - name: Validate downloaded feeds
-        shell: bash
+      - name: Fetch current products directly from Shopify
         run: |
-          set -euo pipefail
-          grep -qi '<products\|<rss\|<channel' tmp-feeds/pazaruvaj.xml
-          grep -qi '<rss\|<channel\|<item' tmp-feeds/google-shopping.xml
-          python - <<'PY'
-          import json
-          with open('tmp-feeds/ai-products.json', 'r', encoding='utf-8') as f:
-              data=json.load(f)
-          if not isinstance(data, (list, dict)):
-              raise SystemExit('Unexpected AI feed JSON shape')
-          PY
+          python scripts/snapshot_public_shopify.py
 
-      - name: Improve Google Shopping feed for Bulgaria
-        shell: bash
+      - name: Rebuild Pazaruvaj, Google, ShopMania and AI product feeds
         run: |
-          set -euo pipefail
-          python - <<'PY'
-          import re
-          from pathlib import Path
-          from xml.sax.saxutils import escape, unescape
-
-          path = Path('tmp-feeds/google-shopping.xml')
-          text = path.read_text(encoding='utf-8')
-          flat_eur = 4.60
-          free_threshold_eur = 35.79
-          item_re = re.compile(r'<item>(.*?)</item>', re.S)
-          price_re = re.compile(r'<g:price>\s*([0-9]+(?:\.[0-9]+)?)\s+EUR\s*</g:price>', re.I)
-          title_re = re.compile(r'<title>(.*?)</title>', re.S | re.I)
-          brand_re = re.compile(r'<g:brand>(.*?)</g:brand>', re.S | re.I)
-          category_re = re.compile(r'<g:product_type>(.*?)</g:product_type>', re.S | re.I)
-          description_re = re.compile(r'<description>.*?</description>', re.S | re.I)
-          gtin_re = re.compile(r'<g:gtin>.*?</g:gtin>', re.S | re.I)
-          mpn_re = re.compile(r'<g:mpn>.*?</g:mpn>', re.S | re.I)
-          identifier_exists_re = re.compile(r'<g:identifier_exists>.*?</g:identifier_exists>', re.S | re.I)
-          existing_shipping_re = re.compile(r'<g:shipping>.*?</g:shipping>', re.S | re.I)
-          counters = {'items':0,'shipping':0,'description_fallback':0,'identifier_false':0}
-          def value(rx, body):
-              m=rx.search(body); return unescape(m.group(1).strip()) if m else ''
-          def patch_item(match):
-              body=match.group(1); counters['items']+=1
-              body=existing_shipping_re.sub('',body)
-              pm=price_re.search(body)
-              if pm:
-                  product_price=float(pm.group(1)); shipping_price=0.00 if product_price>=free_threshold_eur else flat_eur
-                  body += ('\n<g:shipping><g:country>BG</g:country><g:service>Standard</g:service>'
-                           f'<g:price>{shipping_price:.2f} EUR</g:price>'
-                           '<g:min_handling_time>0</g:min_handling_time><g:max_handling_time>0</g:max_handling_time>'
-                           '<g:min_transit_time>3</g:min_transit_time><g:max_transit_time>5</g:max_transit_time></g:shipping>\n')
-                  counters['shipping']+=1
-              if not description_re.search(body):
-                  parts=[p for p in [value(title_re,body),value(brand_re,body),value(category_re,body)] if p]
-                  if parts:
-                      body += f'\n<description>{escape(" · ".join(dict.fromkeys(parts)))}</description>\n'; counters['description_fallback']+=1
-              has_gtin=bool(gtin_re.search(body)); has_mpn=bool(mpn_re.search(body)); body=identifier_exists_re.sub('',body)
-              if not has_gtin and not has_mpn:
-                  body += '\n<g:identifier_exists>false</g:identifier_exists>\n'; counters['identifier_false']+=1
-              return '<item>'+body+'</item>'
-          patched,count=item_re.subn(patch_item,text)
-          if count<1: raise SystemExit('No Google Shopping items found to patch')
-          path.write_text(patched,encoding='utf-8'); print(counters)
-          PY
-          grep -q '<g:country>BG</g:country>' tmp-feeds/google-shopping.xml
-          grep -q '<g:service>Standard</g:service>' tmp-feeds/google-shopping.xml
-
-      - name: Validate unique identifiers and build ShopMania feed
-        shell: bash
-        run: |
-          set -euo pipefail
-          cp tmp-feeds/ai-products.json feeds/ai-products.json
           python scripts/rebuild_channel_feeds.py
-          python - <<'PY'
-          import copy
-          import xml.etree.ElementTree as E
-          ns = '{http://base.google.com/ns/1.0}'
-          original = E.parse('tmp-feeds/google-shopping.xml')
-          shipping = {}
-          for item in original.getroot().findall('./channel/item'):
-              link = item.findtext('link') or item.findtext(ns + 'link')
-              entries = item.findall(ns + 'shipping')
-              if link and entries:
-                  shipping[link] = entries
-          updated = E.parse('feeds/google-shopping.xml')
-          for item in updated.getroot().findall('./channel/item'):
-              link = item.findtext(ns + 'link') or item.findtext('link')
-              for entry in shipping.get(link, []):
-                  item.append(copy.deepcopy(entry))
-          updated.write('feeds/google-shopping.xml', encoding='utf-8', xml_declaration=True)
-          PY
-          cp feeds/pazaruvaj.xml tmp-feeds/pazaruvaj.xml
-          cp feeds/google-shopping.xml tmp-feeds/google-shopping.xml
-          cp feeds/ai-products.json tmp-feeds/ai-products.json
+          python scripts/build_meta_catalog.py
 
-      - name: Publish atomically to branch
+      - name: Verify current date, valid formats and realistic totals
         shell: bash
         run: |
-          set -euo pipefail
-          mv tmp-feeds/pazaruvaj.xml feeds/pazaruvaj.xml
-          mv tmp-feeds/google-shopping.xml feeds/google-shopping.xml
-          mv tmp-feeds/ai-products.json feeds/ai-products.json
+          python -c 'import json,datetime,pathlib,xml.etree.ElementTree as E; p=pathlib.Path("feeds"); s=json.loads((p/"feed-status.json").read_text()); t=datetime.datetime.fromisoformat(s["source_generated_at"].replace("Z","+00:00")); assert (datetime.datetime.now(datetime.timezone.utc)-t).total_seconds()<1800, "Stale source"; assert s["source_rows"]>=8000 and s["pazaruvaj_products"]>=8000, s; assert s["google_products"]>=8000 and s["shopmania_products"]>=8000, s; [E.parse(p/f) for f in ("pazaruvaj.xml","google-shopping.xml","shopmania.xml","meta-catalog.xml")]; assert len(json.loads((p/"ai-products.json").read_text())["products"])>=8000; print("ALL FIVE FEEDS VALID",s)'
           date -u +'%Y-%m-%dT%H:%M:%SZ' > feeds/last-updated.txt
+
+      - name: Publish only fully validated feeds to GitHub (no Render)
+        shell: bash
+        run: |
           git config user.name 'BGShopping Feed Bot'
-          git config user.email 'bgshopping.net@gmail.com'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add feeds
-          if git diff --cached --quiet; then echo 'No feed changes to publish.'; exit 0; fi
-          git commit -m 'Refresh stable product feeds'
-          git push origin HEAD:feed-cdn
+          if git diff --cached --quiet; then
+            echo 'Feeds already match the current Shopify snapshot'
+          else
+            git commit -m 'Refresh current Shopify XML and JSON product feeds without Render'
+            git push origin HEAD:feed-cdn
+          fi
