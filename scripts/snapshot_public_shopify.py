@@ -100,7 +100,7 @@ def make_variant(product, variant):
     if not (barcode.isdigit() and len(barcode) in (8, 12, 13, 14)):
         barcode = ""
     sku = clean(variant.get("sku"), 100)
-    description = clean(product.get("body_html") or product.get("description"), 1800)
+    description = clean(product.get("body_html") or product.get("description"), 550)
     url = f"{BASE}/products/{quote(handle, safe='-')}?variant={identifier}"
     record = {
         "@type": "Product",
