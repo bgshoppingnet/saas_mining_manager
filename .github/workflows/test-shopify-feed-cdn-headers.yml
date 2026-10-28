@@ -1,0 +1,26 @@
+name: Verify Shopify CDN feed hosting
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/test-shopify-feed-cdn-headers.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test-cdn:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Verify XML and JSON HTTP headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          for item in 'xml|https://cdn.shopify.com/s/files/1/1044/1844/3609/files/bgshopping-feed-xml-hosting-test.xml?v=1793229561' 'json|https://cdn.shopify.com/s/files/1/1044/1844/3609/files/bgshopping-feed-status-2026-10-29.json?v=1793229529'; do
+            kind="${item%%|*}"
+            url="${item#*|}"
+            echo "BEGIN $kind"
+            curl -sSIL --connect-timeout 12 --max-time 30 "$url" | grep -Ei '^HTTP/|^content-type:|^content-disposition:|^content-length:|^cache-control:|^location:' || true
+            status=$(curl -sSL --range 0-32 -o /dev/null -w '%{http_code}' --connect-timeout 12 --max-time 30 "$url")
+            echo "STATUS $kind $status"
+            test "$status" = 200 || test "$status" = 206
+          done
