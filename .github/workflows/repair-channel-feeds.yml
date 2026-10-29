@@ -4,6 +4,7 @@ on:
     branches: [feed-cdn]
     paths:
       - scripts/rebuild_channel_feeds.py
+      - scripts/build_meta_catalog.py
       - .github/workflows/repair-channel-feeds.yml
       - feeds/ai-products.json
   workflow_dispatch:
@@ -23,6 +24,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: python scripts/rebuild_channel_feeds.py
+      - run: python scripts/build_meta_catalog.py
       - name: Commit validated feeds
         run: |
           git config user.name 'BGShopping Feed Builder'

@@ -8,7 +8,7 @@ import xml.etree.ElementTree as ET
 from collections import Counter
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlsplit, urlunsplit, quote
 
 ROOT = Path(__file__).resolve().parents[1] / 'feeds'
 G = 'http://base.google.com/ns/1.0'
@@ -50,6 +50,20 @@ def stable_id(url):
     return 'BG-' + vid
 
 
+def image_url(value):
+    """Return a public, ASCII HTTPS image URL; preserve existing URL escapes."""
+    if not isinstance(value, str):
+        return ''
+    parts = urlsplit(html.unescape(value.strip()))
+    if parts.scheme != 'https' or not parts.netloc or parts.username or parts.password:
+        return ''
+    if re.search(r'no[-_]?image|placeholder|default[-_]?image', parts.path, re.I):
+        return ''
+    return urlunsplit((parts.scheme, parts.netloc.encode('idna').decode('ascii'),
+                       quote(parts.path, safe='/%:@!$&\'()*+,;=-._~'),
+                       quote(parts.query, safe='=&%/:?@!$\'()*+,;~-._'), ''))
+
+
 def prepare(source):
     rows, excluded, seen = [], Counter(), set()
     for original in source['products']:
@@ -63,7 +77,7 @@ def prepare(source):
             images = row.get('image') or []
             if isinstance(images, str):
                 images = [images]
-            images = list(dict.fromkeys(u for u in images if isinstance(u, str) and urlsplit(u).scheme == 'https' and urlsplit(u).netloc and not re.search(r'no[-_]?image|placeholder|default[-_]?image', u, re.I)))
+            images = list(dict.fromkeys(cleaned for u in images if (cleaned := image_url(u))))
             if not images:
                 excluded['missing_image'] += 1
                 continue
@@ -113,7 +127,8 @@ def build(source, output=ROOT):
             if value:
                 add(node, tag, value)
         for i, image in enumerate(p['image']):
-            add(node, 'Image_url' if i == 0 else f'Image_url_{i+1}', image)
+            # Current Pazaruvaj field names (July 2021 unified syntax).
+            add(node, 'ImageUrl' if i == 0 else f'ImageUrl{i+1}', image)
         for name, value in [('Модел', p.get('model') or p.get('mpn')), ('Материал', p.get('material'))]:
             if value:
                 attribute = ET.SubElement(node, 'Attribute')
@@ -156,6 +171,20 @@ def build(source, output=ROOT):
     report = {'source_generated_at': source.get('generated_at'), 'currency': 'EUR', 'source_rows': len(source['products']), 'pazaruvaj_products': len(available), 'google_products': len(rows), 'ai_products': len(rows), 'shopmania_products': len(shop_rows), 'shopmania_limit': 10000, 'excluded': excluded}
     for filename in ['pazaruvaj.xml', 'google-shopping.xml', 'shopmania.xml']:
         ET.parse(output / filename)
+    # A syntactically valid feed can still lose its pictures if a field is renamed.
+    image_checks = {}
+    for filename, item_path, image_tag in [
+        ('pazaruvaj.xml', 'product', 'ImageUrl'),
+        ('google-shopping.xml', 'channel/item', '{' + G + '}image_link'),
+        ('shopmania.xml', 'products/Product', 'Image'),
+    ]:
+        items = ET.parse(output / filename).getroot().findall(item_path)
+        missing = sum(not image_url(item.findtext(image_tag, '')) for item in items)
+        if missing:
+            raise ValueError(f'{filename}: {missing} offers missing valid image fields')
+        image_checks[filename] = {'offers': len(items), 'with_image': len(items), 'missing_image': 0}
+    report['image_fields'] = image_checks
+    report['normalization_version'] = 'collection-years-images-2026-10-29'
     for filename in ['pazaruvaj.xml', 'shopmania.xml']:
         if (output / filename).stat().st_size > (20_000_000 if filename == 'shopmania.xml' else 100_000_000):
             raise ValueError('Feed exceeds supported file size')
