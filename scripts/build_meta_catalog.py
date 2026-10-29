@@ -4,6 +4,7 @@ This does not activate a second Meta catalog source: native Shopify Facebook/Ins
 continues to be the primary channel. URL is available if a supplemental feed is needed.
 """
 import xml.etree.ElementTree as ET
+import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1] / "feeds"
@@ -22,7 +23,7 @@ for item in items:
     availability = item.find(f"{{{G}}}availability")
     if availability is not None:
         availability.text = "in stock" if availability.text == "in_stock" else "out of stock"
-    if item.find(f"{{{G}}}image_link") is None:
+    if not item.findtext(f"{{{G}}}image_link", '').startswith('https://'):
         raise RuntimeError("Missing product image in source XML")
     if item.find(f"{{{G}}}price") is None:
         raise RuntimeError("Missing EUR price in source XML")
@@ -31,4 +32,9 @@ if title is not None:
     title.text = "BGShopping.net Meta Catalog"
 tree.write(dst, encoding="utf-8", xml_declaration=True)
 ET.parse(dst)
+status_path = ROOT / 'feed-status.json'
+if status_path.exists():
+    status = json.loads(status_path.read_text(encoding='utf-8'))
+    status.setdefault('image_fields', {})['meta-catalog.xml'] = {'offers': len(items), 'with_image': len(items), 'missing_image': 0}
+    status_path.write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding='utf-8')
 print(f"Meta XML validated: {len(items)} items, {dst.stat().st_size} bytes", flush=True)

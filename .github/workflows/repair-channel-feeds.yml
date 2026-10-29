@@ -4,7 +4,9 @@ on:
     branches: [feed-cdn]
     paths:
       - scripts/rebuild_channel_feeds.py
+      - scripts/feed_category_rules.py
       - scripts/build_meta_catalog.py
+      - scripts/test_feed_normalization.py
       - .github/workflows/repair-channel-feeds.yml
       - feeds/ai-products.json
   workflow_dispatch:
@@ -23,6 +25,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - run: python scripts/test_feed_normalization.py
       - run: python scripts/rebuild_channel_feeds.py
       - run: python scripts/build_meta_catalog.py
       - name: Commit validated feeds

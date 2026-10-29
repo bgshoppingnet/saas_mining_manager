@@ -9,6 +9,7 @@ from collections import Counter
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit, urlunsplit, quote
+from feed_category_rules import classify, BROAD
 
 ROOT = Path(__file__).resolve().parents[1] / 'feeds'
 G = 'http://base.google.com/ns/1.0'
@@ -39,7 +40,7 @@ def specific_category(row):
         return 'Играчки > Образователни игри > Детски музикални инструменти'
     if sku == '14780' or (category in ('Общи продукти', 'Играчки', 'Детски велосипеди') and re.search(r'детск\w* велосипед', name, re.I)):
         return 'Спорт и фитнес > Велосипедизъм > Велосипеди'
-    return category
+    return classify(name, category)
 
 
 def stable_id(url):
@@ -184,7 +185,9 @@ def build(source, output=ROOT):
             raise ValueError(f'{filename}: {missing} offers missing valid image fields')
         image_checks[filename] = {'offers': len(items), 'with_image': len(items), 'missing_image': 0}
     report['image_fields'] = image_checks
+    report['image_fields']['ai-products.json'] = {'offers': len(rows), 'with_image': sum(bool(p['image']) for p in rows), 'missing_image': 0}
     report['normalization_version'] = 'collection-years-images-2026-10-29'
+    report['category_review_count'] = sum((p.get('category') or '').casefold() in BROAD for p in rows)
     for filename in ['pazaruvaj.xml', 'shopmania.xml']:
         if (output / filename).stat().st_size > (20_000_000 if filename == 'shopmania.xml' else 100_000_000):
             raise ValueError('Feed exceeds supported file size')
