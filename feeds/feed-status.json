@@ -7,5 +7,23 @@
   "ai_products": 12103,
   "shopmania_products": 10000,
   "shopmania_limit": 10000,
-  "excluded": {}
+  "excluded": {},
+  "image_fields": {
+    "pazaruvaj.xml": {
+      "offers": 12103,
+      "with_image": 12103,
+      "missing_image": 0
+    },
+    "google-shopping.xml": {
+      "offers": 12103,
+      "with_image": 12103,
+      "missing_image": 0
+    },
+    "shopmania.xml": {
+      "offers": 10000,
+      "with_image": 10000,
+      "missing_image": 0
+    }
+  },
+  "normalization_version": "collection-years-images-2026-10-29"
 }
