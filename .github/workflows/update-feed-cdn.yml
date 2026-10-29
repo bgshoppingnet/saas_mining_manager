@@ -30,6 +30,9 @@ jobs:
         run: |
           python -m py_compile scripts/snapshot_public_shopify.py scripts/rebuild_channel_feeds.py scripts/build_meta_catalog.py scripts/sync_shopify_cdn.py
 
+      - name: Check collection years, categories and image URL boundaries
+        run: python scripts/test_feed_normalization.py
+
       - name: Fetch current products directly from Shopify
         run: |
           python scripts/snapshot_public_shopify.py
