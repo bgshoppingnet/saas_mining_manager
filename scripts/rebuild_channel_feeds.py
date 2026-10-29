@@ -19,6 +19,29 @@ def text(value, limit=1500):
     return ' '.join(html.unescape(re.sub(r'<[^>]*>', ' ', str(value or ''))).split())[:limit]
 
 
+def clean_collection_years(name, brand='', url=''):
+    """Remove collection years, retaining model/compatibility years and units."""
+    context = f'{name} {brand} {url}'
+    if not re.search(r'kikkaboo|kinderkraft|avionaut', context, re.I):
+        return name
+    if re.search(r'протектор|мобилен телефон|слушалки|каталог', name, re.I):
+        return name
+    return re.sub(r'\s+', ' ', re.sub(r'(?<![\w-])20[12]\d(?![\w-])(?:\s*г\.)?', '', name)).strip(' -–')
+
+
+def specific_category(row):
+    """Map the reported mixed product families to verified Pazaruvaj paths."""
+    name, sku = row.get('name', ''), str(row.get('sku') or '')
+    category = row.get('category') or ''
+    if sku == 'PAT44943' or (category in ('Общи продукти', 'Играчки') and re.search(r'спално бельо|спален комплект', name, re.I)):
+        return 'Мебели, обзавеждане > Домашен текстил > Спално бельо, спален комплект'
+    if sku == 'PAT61850' or (category in ('Общи продукти', 'Играчки') and re.search(r'детск\w* китар', name, re.I)):
+        return 'Играчки > Образователни игри > Детски музикални инструменти'
+    if sku == '14780' or (category in ('Общи продукти', 'Играчки', 'Детски велосипеди') and re.search(r'детск\w* велосипед', name, re.I)):
+        return 'Спорт и фитнес > Велосипедизъм > Велосипеди'
+    return category
+
+
 def stable_id(url):
     part = urlsplit(url)
     vid = parse_qs(part.query).get('variant', [''])[0]
@@ -47,7 +70,10 @@ def prepare(source):
             if row['id'] in seen:
                 excluded['duplicate_variant'] += 1
                 continue
-            row['name'] = text(row.get('name'), 250)
+            brand_value = row.get('brand') or ''
+            brand_value = brand_value.get('name', '') if isinstance(brand_value, dict) else str(brand_value)
+            row['name'] = clean_collection_years(text(row.get('name'), 250), brand_value, row.get('url', ''))
+            row['category'] = specific_category(row)
             if not row['name']:
                 raise ValueError('Missing name')
             row['image'] = images[:3]
