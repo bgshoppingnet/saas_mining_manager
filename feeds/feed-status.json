@@ -23,7 +23,18 @@
       "offers": 10000,
       "with_image": 10000,
       "missing_image": 0
+    },
+    "ai-products.json": {
+      "offers": 12103,
+      "with_image": 12103,
+      "missing_image": 0
+    },
+    "meta-catalog.xml": {
+      "offers": 12103,
+      "with_image": 12103,
+      "missing_image": 0
     }
   },
-  "normalization_version": "collection-years-images-2026-10-29"
+  "normalization_version": "collection-years-images-2026-10-29",
+  "category_review_count": 0
 }
