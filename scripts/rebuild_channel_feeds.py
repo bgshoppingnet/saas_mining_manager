@@ -130,6 +130,10 @@ def build(source, output=ROOT):
         for i, image in enumerate(p['image']):
             # Current Pazaruvaj field names (July 2021 unified syntax).
             add(node, 'ImageUrl' if i == 0 else f'ImageUrl{i+1}', image)
+            if i == 0:
+                # Existing partner account explicitly maps ImageUrl <- image_url.
+                # Retain that exact mapped field alongside the current standard.
+                add(node, 'image_url', image)
         for name, value in [('Модел', p.get('model') or p.get('mpn')), ('Материал', p.get('material'))]:
             if value:
                 attribute = ET.SubElement(node, 'Attribute')
