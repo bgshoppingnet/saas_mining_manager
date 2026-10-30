@@ -1,37 +1,37 @@
 {
-  "source_generated_at": "2026-10-30T05:59:27Z",
+  "source_generated_at": "2026-10-30T15:07:11Z",
   "currency": "EUR",
-  "source_rows": 12103,
-  "pazaruvaj_products": 12103,
-  "google_products": 12103,
-  "ai_products": 12103,
-  "shopmania_products": 10000,
+  "source_rows": 9998,
+  "pazaruvaj_products": 9998,
+  "google_products": 9998,
+  "ai_products": 9998,
+  "shopmania_products": 9998,
   "shopmania_limit": 10000,
   "excluded": {},
   "image_fields": {
     "pazaruvaj.xml": {
-      "offers": 12103,
-      "with_image": 12103,
+      "offers": 9998,
+      "with_image": 9998,
       "missing_image": 0
     },
     "google-shopping.xml": {
-      "offers": 12103,
-      "with_image": 12103,
+      "offers": 9998,
+      "with_image": 9998,
       "missing_image": 0
     },
     "shopmania.xml": {
-      "offers": 10000,
-      "with_image": 10000,
+      "offers": 9998,
+      "with_image": 9998,
       "missing_image": 0
     },
     "ai-products.json": {
-      "offers": 12103,
-      "with_image": 12103,
+      "offers": 9998,
+      "with_image": 9998,
       "missing_image": 0
     },
     "meta-catalog.xml": {
-      "offers": 12103,
-      "with_image": 12103,
+      "offers": 9998,
+      "with_image": 9998,
       "missing_image": 0
     }
   },
