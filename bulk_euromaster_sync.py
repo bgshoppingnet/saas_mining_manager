@@ -248,7 +248,16 @@ def run():
                 if not p:
                     creates.append(item); continue
                 existing=((v or {}).get('mf') or {}).get('fingerprint') or (p.get('mf') or {}).get('fingerprint')
-                if existing==item['_fp']:
+                # Reconcile drift even when the feed fingerprint is unchanged:
+                # another pricing job or manual edit may have changed Shopify.
+                shop_price = str((v or {}).get('price') or '').strip()
+                feed_price = str(item.get('price') or '').strip()
+                try:
+                    from decimal import Decimal
+                    price_matches = (Decimal(shop_price) == Decimal(feed_price))
+                except Exception:
+                    price_matches = False
+                if existing==item['_fp'] and price_matches:
                     unchanged.append((item,p,v))
                 else:
                     updates.append((item,p,v))
