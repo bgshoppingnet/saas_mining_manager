@@ -183,6 +183,22 @@ def normalize(node, supplier):
         currency = 'BGN'
         if not sku:
             sku = ext_id
+    elif supplier_key == 'euromaster':
+        # Prefer an explicit recommended customer retail price, if supplied.
+        # Never use a dealer/purchase/discounted B2B price as a storefront price.
+        price = (text(node, {'recommended_retail_price_with_tax'})
+                 or text(node, {'recommended_retail_price','recommended_price_with_tax'})
+                 or text(node, {'rrp_price_with_tax','rrp_with_tax','retail_price_with_tax'})
+                 or text(node, {'rrp_price','retail_price'})
+                 or text(node, {'price_with_tax'}))
+        # Fail closed on missing/zero/negative prices; do not replace with a
+        # supplier purchase price or a value from an ambiguous generic field.
+        if decimal_price(price) is None or decimal_price(price) <= 0:
+            return None
+        qty = text(node, {'quantity','qty','stock','availability','availability_status','available','stock_quantity'})
+        description = text(node, {'description','description_bg','body_html','long_description','short_description','short_description_bg'})
+        category = text(node, {'category','category_bg','product_type','category_name','categories'})
+        currency = text(node, {'currency','currency_code'})
     else:
         price = text(node, {'price_with_tax','price','retail_price','rrp_price','sale_price','final_price','price_gross'})
         qty = text(node, {'quantity','qty','stock','availability','availability_status','available','stock_quantity'})
