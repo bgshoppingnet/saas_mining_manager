@@ -133,10 +133,13 @@ def normalize_price_currency(supplier, price, currency):
             return '', 'EUR'
         if currency_key == 'EUR':
             return format(amount.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP), 'f'), 'EUR'
-        if currency_key in ('', 'BGN'):
+        if currency_key == 'BGN':
             eur = (amount / BGN_PER_EUR).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
             return format(eur, 'f'), 'EUR'
-        return '', 'EUR'  # Unknown currency: fail closed
+        # Feed has no currency tag and product-level currency is ambiguous.
+        # SKU 010129 matches BGN conversion, while SKU 030270's public
+        # EUR retail listings indicate a different convention. Do not guess.
+        return '', 'EUR'
     if supplier_key == 'bgelectronics':
         if amount is None:
             return price, 'EUR'
