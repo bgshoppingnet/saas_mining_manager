@@ -186,6 +186,7 @@ def variant_fields(item,vid=None,final=False):
         v['sku']=norm(item['sku']); v['inventoryItem']['sku']=norm(item['sku'])
     if norm(item.get('ean')):
         v['barcode']=norm(item['ean'])
+    # A blank or unverified supplier price must never overwrite Shopify.
     if str(item.get('price') or '').strip():
         v['price']=str(item['price'])
     return v
@@ -263,7 +264,11 @@ def run():
                     updates.append((item,p,v))
             status.update(matched=len(updates)+len(unchanged),unchanged=len(unchanged),create_queued=len(creates),update_queued=len(updates),conflicts=len(conflicts)); core.write_status(status)
 
-            create_rows=[x for x in (create_vars(i) for i in creates) if x]
+            # Safety: never auto-publish or auto-create Euromaster products from an
+            # unverified price feed. All existing ACTIVE/DRAFT statuses are kept.
+            # Only explicitly audited creation workflows may add missing SKUs.
+            create_rows=[]
+            status['create_skipped_unverified']=len(creates)
             status['phase']='create'; name=op('Create',d)
             bulk,errs=core.run_bulk(session,name,mutation(name,'create'),create_rows,status,deadline)
             if str((bulk or {}).get('status'))!='COMPLETED': status['state']='checkpoint_wait'; core.write_status(status); return status
