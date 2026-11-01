@@ -242,7 +242,22 @@ def run():
                 status['state']='checkpoint_wait'; core.write_status(status); return status
             idx=build_indexes(products)
             creates=[]; updates=[]; unchanged=[]; conflicts=[]
+            # Price write safeguard: for now only verified Euromaster EUR RRPs
+            # may enter Shopify. The supplier XML has inconsistent unlabelled
+            # currency/value conventions; do not infer all RRPs from it.
+            VERIFIED_EUR_RRP = {
+                '010129':'32.20','010130':'42.95','010131':'40.90',
+                '010132':'24.98','010133':'63.95','010139':'34.96',
+                '010140':'26.95','010141':'28.11','010142':'36.95',
+                '010201':'52.96','010202':'23.95','030270':'34.95',
+            }
+            status['unverified_price_skipped'] = 0
             for item in rows:
+                sku = norm(item.get('sku'))
+                if sku not in VERIFIED_EUR_RRP:
+                    status['unverified_price_skipped'] += 1
+                    continue
+                item['price'] = VERIFIED_EUR_RRP[sku]
                 p,v,conf=match(item,idx)
                 if conf:
                     conflicts.append(item); continue
