@@ -124,7 +124,17 @@ def normalize_price_currency(supplier, price, currency):
     supplier_key = str(supplier or '').strip().lower()
     currency_key = str(currency or '').strip().upper()
     amount = decimal_price(price)
-    if supplier_key in {'euromaster','bgelectronics'}:
+    if supplier_key == 'euromaster':
+        # Euromaster's current XML feed publishes EUR prices (e.g. SKU 030270:
+        # price_with_tax=34.96 EUR). Dividing by the old BGN/EUR rate
+        # underprices products and can cause sales below supplier cost.
+        if amount is None:
+            return price, 'EUR'
+        if currency_key == 'BGN':
+            eur = (amount / BGN_PER_EUR).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            return format(eur, 'f'), 'EUR'
+        return format(amount.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP), 'f'), 'EUR'
+    if supplier_key == 'bgelectronics':
         if amount is None:
             return price, 'EUR'
         eur = (amount / BGN_PER_EUR).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
