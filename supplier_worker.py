@@ -11,7 +11,7 @@ BGN_PER_EUR = Decimal('1.95583')
 
 DEFAULT_FEEDS = [
     {"name": "Lorelli", "url": "https://lorelli.eu/ExportRssXmlFeed.aspx?token=38052958-16d5-43a7-9724-738c2550b7c1&lang=bg-bg", "enabled": True},
-    {"name": "Euromaster", "url": "https://www.euromasterbg.com/feeds/productfeedshops.xml", "enabled": True},
+    {"name": "Euromaster", "url": "https://api.euromasterbg.com/feeds/productfeedshops.xml", "enabled": True},
     {"name": "BGElectronics", "url": "https://www.bgelectronics.eu/index.php?route=feed/products_feed_pro", "enabled": True},
 ]
 
