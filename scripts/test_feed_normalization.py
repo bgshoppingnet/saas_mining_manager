@@ -15,6 +15,20 @@ class ProductBoundaryTests(unittest.TestCase):
   for name,leaf in cases:self.assertTrue(specific_category({'name':name,'category':'Играчки'}).endswith(leaf))
  def test_textile_decoration_is_not_a_toy(self):
   self.assertEqual(specific_category({'name':'Сет 4 части Ранфорс Влакче Сиво','category':'Текстил'}),'Бебешки текстил > Спални комплекти')
+ def test_mixed_shopify_types(self):
+  cases = [
+   ('Стол за хранене CHEF', 'Бебешки колички', 'Столче за хранене, повдигащо столче'),
+   ('Силиконова гризалка октопод', 'Бебешки колички', 'Гризалка'),
+   ('Кошара TORINO 2 нива', 'Бебешки колички', 'Сгъваеми кошари'),
+   ('КЕНГУРУ WEEKEND', 'Бебешки колички', 'Кенгура за бебе'),
+   ('Cosatto CT5880 Giggle + Чанта + IsoFix база', 'Бебешки колички', 'Бебешки колички'),
+   ('Cosatto Woosh бебешка количка', 'Бебешки колички', 'Бебешки колички'),
+   ('Стъклен протектор за Samsung S24', 'Samsung', 'Протектори за телефони'),
+   ('Bluetooth слушалки Onikuma', 'Bluetooth', 'Безжични слушалки'),
+  ]
+  for name, category, expected in cases:
+   with self.subTest(name=name):
+    self.assertEqual(specific_category({'name': name, 'category': category}), expected)
  def test_image_url_encoding(self):
   self.assertEqual(image_url('https://example.com/детска снимка.jpg?v=1&amp;width=600'),'https://example.com/%D0%B4%D0%B5%D1%82%D1%81%D0%BA%D0%B0%20%D1%81%D0%BD%D0%B8%D0%BC%D0%BA%D0%B0.jpg?v=1&width=600')
   for value in ['','javascript:bad','https://example.com/placeholder.jpg','https://user:password@example.com/a.jpg']:

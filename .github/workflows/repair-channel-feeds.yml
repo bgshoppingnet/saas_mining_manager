@@ -3,6 +3,7 @@ on:
   push:
     branches: [feed-cdn]
     paths:
+      - scripts/snapshot_public_shopify.py
       - scripts/rebuild_channel_feeds.py
       - scripts/feed_category_rules.py
       - scripts/build_meta_catalog.py
@@ -26,6 +27,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: python scripts/test_feed_normalization.py
+      - run: python scripts/snapshot_public_shopify.py
       - run: python scripts/rebuild_channel_feeds.py
       - run: python scripts/build_meta_catalog.py
       - name: Commit validated feeds
